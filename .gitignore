@@ -1,0 +1,9 @@
+node_modules
+dist
+.DS_Store
+.vercel
+*.log
+
+# Claude Code local state. launch.json is shared project config and is kept;
+# settings.local.json holds per-machine permission grants and is not.
+.claude/settings.local.json
