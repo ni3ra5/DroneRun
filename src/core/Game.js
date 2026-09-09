@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { Input } from './Input.js';
 import { CameraRig } from './CameraRig.js';
 import { randomSeed, randomPilotName } from './rng.js';
-import { readSeed, writeSeed, shareUrl, readRoom, writeRoom, inviteUrl } from './link.js';
+import { readSeed, writeSeed, readRoom, writeRoom, inviteUrl } from './link.js';
 
 import { DronePhysics } from '../drone/DronePhysics.js';
 import { DroneModel, PLAYER_COLORS } from '../drone/DroneModel.js';
@@ -461,7 +461,7 @@ export class Game {
       canStart,
       onReady: (ready) => this.online.setReady(ready),
       onStartRace: () => this.online.startRace(),
-      onSeed: (seed) => this.online.setSeed(seed),
+      onNewCourse: () => this.online.setSeed(randomSeed()),
       onCopyInvite: async () => {
         try {
           await navigator.clipboard.writeText(inviteUrl(l.room, l.seed ?? this.seed));
@@ -518,45 +518,25 @@ export class Game {
     this.music.pause();
     this.hud.setMuted(this.music.muted);
     this.hud.showStart({
-      seed: this.seed,
       colorIndex: this.colorIndex,
       theme: this.theme,
       botCount: this.botCount,
       online: relayConfigured(),
       name: this.identity.name,
       onName: (n) => this.setName(n),
-      onHost: (seed) => this.goOnline(makeRoomCode(), { create: true, seed }),
+      onHost: () => this.goOnline(makeRoomCode(), { create: true, seed: this.seed }),
       onJoin: (code) => this.goOnline(code, { create: false }),
       seedIsExplicit: this._seedIsExplicit,
-      onStart: (seed) => {
-        // Typing a different seed always means "race exactly this".
-        if (seed !== this.seed) {
-          this._seedIsExplicit = true;
-          this.loadTrack(seed);
-        }
-        this.beginFresh();
-      },
+      onStart: () => this.beginFresh(),
       onStartRandom: () => {
         this._seedIsExplicit = false;
         this.loadTrack(randomSeed());
         this.begin();
       },
-      onSeed: () => {
-        const s = randomSeed();
-        this.loadTrack(s);
-        return s;
-      },
+
       onColor: (i) => this.setColor(i),
       onTheme: (t) => this.setTheme(t),
       onBots: (n) => this.setBotCount(n),
-      onCopyLink: async (seed) => {
-        try {
-          await navigator.clipboard.writeText(shareUrl(seed));
-          return true;
-        } catch {
-          return false;   // clipboard needs a secure context and permission
-        }
-      },
     });
   }
 

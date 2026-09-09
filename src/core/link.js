@@ -43,12 +43,6 @@ export function writeRoom(room, seed) {
   window.history.replaceState(null, '', url.toString());
 }
 
-export function shareUrl(seed) {
-  const url = new URL(window.location.href);
-  url.hash = `seed=${encodeURIComponent(seed)}`;
-  return url.toString();
-}
-
 /** The link a friend opens to land straight in this lobby. */
 export function inviteUrl(room, seed) {
   const url = new URL(window.location.href);

@@ -363,7 +363,7 @@ export class HUD {
     this.root.classList.remove('modal-open');
   }
 
-  showStart({ seed, colorIndex, theme, botCount, online, name, seedIsExplicit, onStart, onSeed, onColor, onTheme, onBots, onCopyLink, onHost, onJoin, onName, onStartRandom }) {
+  showStart({ colorIndex, theme, botCount, online, name, seedIsExplicit, onStart, onColor, onTheme, onBots, onHost, onJoin, onName, onStartRandom }) {
     const swatches = PLAYER_COLORS.map((c, i) => `
       <div class="sw" role="radio" tabindex="0" data-color="${i}"
            aria-checked="${i === colorIndex}" title="${c.name}"
@@ -378,23 +378,10 @@ export class HUD {
         <div class="tag">Procedural time trial</div>
 
         <p>
-          Every seed builds a different course. Gates are placed so you have to
-          climb, dive, turn back on yourself and thread gaps — not just hold
-          forward. Pass them in order; the amber ring is always your next one.
+          A new course every race. Gates are placed so you have to climb, dive,
+          turn back on yourself and thread gaps — not just hold forward. Pass
+          them in order; the amber ring is always your next one.
         </p>
-
-        <div class="field">
-          <div class="label">Track seed</div>
-          <div class="row">
-            <input type="text" data-seed value="${seed}" spellcheck="false" />
-            <button data-reseed>Randomise</button>
-            <button data-copy>Copy link</button>
-          </div>
-          <div style="font-size:11px;color:var(--dim);margin-top:6px">
-            Every start rolls a new course. Type a seed here to race a
-            specific one.
-          </div>
-        </div>
 
         <div class="field">
           <div class="label">Pilot name</div>
@@ -439,8 +426,8 @@ export class HUD {
 
         <div class="row">
           ${seedIsExplicit
-            ? `<button class="primary" data-start>Race this course &nbsp;&rarr;</button>
-               <button data-random>New random course</button>`
+            ? `<button class="primary" data-start>Race the shared course &nbsp;&rarr;</button>
+               <button data-random>New course instead</button>`
             : '<button class="primary" data-start>Start solo &nbsp;&rarr;</button>'}
           ${online
             ? `<button data-host>Create online race</button>
@@ -452,7 +439,6 @@ export class HUD {
       </div>
     `);
 
-    const seedInput = modal.querySelector('[data-seed]');
     const nameInput = modal.querySelector('[data-name]');
     // Commit the name on the way out of the field, so it is set before any
     // button that sends it to the relay is clicked.
@@ -461,19 +447,13 @@ export class HUD {
     const commitName = () => onName(nameInput.value);
     modal.querySelector('[data-start]').onclick = () => {
       commitName();
-      onStart(seedInput.value.trim() || seed);
+      onStart();
     };
     // Only shown when a specific seed arrived from a link.
     modal.querySelector('[data-random]')?.addEventListener('click', () => {
       commitName();
       onStartRandom();
     });
-    modal.querySelector('[data-reseed]').onclick = () => { seedInput.value = onSeed(); };
-    modal.querySelector('[data-copy]').onclick = async (e) => {
-      const ok = await onCopyLink(seedInput.value.trim() || seed);
-      e.target.textContent = ok ? 'Copied' : 'Copy failed';
-      setTimeout(() => { e.target.textContent = 'Copy link'; }, 1600);
-    };
     modal.querySelectorAll('[data-bots]').forEach((btn) => {
       btn.onclick = () => {
         modal.querySelectorAll('[data-bots]').forEach((o) => o.setAttribute('aria-checked', 'false'));
@@ -497,15 +477,10 @@ export class HUD {
       sw.onclick = pick;
       sw.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } };
     });
-    seedInput.onkeydown = (e) => {
-      if (e.key === 'Enter') onStart(seedInput.value.trim() || seed);
-      e.stopPropagation();
-    };
-
     if (online) {
       modal.querySelector('[data-host]').onclick = () => {
         commitName();
-        onHost(seedInput.value.trim() || seed);
+        onHost();
       };
       const codeInput = modal.querySelector('[data-joincode]');
       const join = () => {
@@ -531,7 +506,7 @@ export class HUD {
    */
   showLobby({
     room, seed, players, selfId, isHost, status, canStart,
-    onReady, onStartRace, onSeed, onCopyInvite, onLeave,
+    onReady, onStartRace, onNewCourse, onCopyInvite, onLeave,
   }) {
     const me = players.find((p) => p.id === selfId);
     const rows = players.map((p) => `
@@ -563,11 +538,11 @@ export class HUD {
         </div>
 
         <div class="field">
-          <div class="label">Course seed${isHost ? '' : ' (set by the host)'}</div>
+          <div class="label">Course</div>
           <div class="row">
-            <input type="text" data-lobbyseed value="${escapeHtml(seed ?? '')}"
-                   spellcheck="false" ${isHost ? '' : 'disabled'} />
-            ${isHost ? '<button data-setseed>Change course</button>' : ''}
+            ${isHost
+              ? '<button data-newcourse>Roll a new course</button>'
+              : '<span style="font-size:11.5px;color:var(--dim)">Chosen by the host</span>'}
           </div>
         </div>
 
@@ -592,14 +567,8 @@ export class HUD {
     };
     modal.querySelector('[data-leave]').onclick = onLeave;
 
-    const seedInput = modal.querySelector('[data-lobbyseed]');
-    seedInput.onkeydown = (e) => e.stopPropagation();
     if (isHost) {
-      const apply = () => {
-        const v = seedInput.value.trim();
-        if (v) onSeed(v);
-      };
-      modal.querySelector('[data-setseed]').onclick = apply;
+      modal.querySelector('[data-newcourse]').onclick = () => onNewCourse();
       const startBtn = modal.querySelector('[data-startrace]');
       if (canStart) startBtn.onclick = onStartRace;
     } else {
@@ -642,7 +611,7 @@ export class HUD {
         <div class="tag">${isRecord ? 'New personal best' : 'Race complete'}</div>
         <h2 style="font-family:ui-monospace,Menlo,monospace;font-size:44px">${formatTime(time)}</h2>
         <p style="margin-bottom:14px">
-          ${place}${splits.length} gates on seed <b style="color:#e8f1ff">${seed}</b>. ${verdict}
+          ${place}${splits.length} gates. ${verdict}
         </p>
         <div class="splits">${rows}</div>
         <div class="row">
