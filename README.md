@@ -304,6 +304,70 @@ through it.
   courses against live collision. This is the check that proves generated tracks
   are actually raceable rather than merely generated.
 
+## Playing online
+
+Two pieces, because they have different hosting needs:
+
+| Piece | Where |
+| --- | --- |
+| Game client (static) | **Vercel** |
+| Realtime relay | **Cloudflare Workers + Durable Objects** (`server/`) |
+
+Vercel cannot host the relay half. Its functions start per request, have
+execution limits, and cannot hold an open WebSocket or keep room state
+between calls — the opposite of what a lobby needs.
+
+Durable Objects fit because a room *is* an object: one Durable Object per
+race code, single-threaded, with its own state. It uses the **WebSocket
+Hibernation** API, so an idle lobby is evicted and costs nothing until a
+message arrives, which is why this stays inside the free tier for a group of
+friends.
+
+### Deploy the relay
+
+```bash
+cd server
+npx wrangler login       # once, in your own browser
+npm run deploy
+```
+
+`wrangler deploy` prints a URL like
+`https://dronerun-relay.<your-subdomain>.workers.dev`. Paste it into
+`PRODUCTION_RELAY` in [`src/config.js`](src/config.js) as a `wss://` URL, then
+redeploy the client. Until that constant is set, the start screen simply
+hides the online controls rather than offering a button that cannot work.
+
+Run it locally with `cd server && npm run dev`; the client points at
+`ws://127.0.0.1:8787` automatically on localhost. A `?relay=` query parameter
+overrides both, which is useful for pointing a deployed client at a local
+relay while debugging.
+
+`cd server && npm test` runs 21 protocol checks against a running relay:
+seeding, host assignment and migration, ready state, permission (only the
+host may change the course or start), state relay, and refusing a ninth
+player.
+
+### How a race works
+
+The host creates a room and shares the invite link, which carries the room
+code and seed. Opening it drops a friend straight into the lobby. Everyone
+readies up, the host starts, and each client runs its own 3-2-1.
+
+Clocks are deliberately *not* synchronised. Aligning them would buy tens of
+milliseconds, which is meaningless when every player's time is measured
+locally from their own countdown ending.
+
+Only kinematic state crosses the wire — course geometry never does, since
+both ends generate it from the seed. That is about 40 bytes per player per
+tick, so a full eight-player room is roughly 6 KB/s. Peers are rendered
+120 ms behind the newest packet and interpolated between the two snapshots
+that straddle render time, so 20 Hz updates draw smoothly at any frame rate.
+
+Bots are suppressed in an online race — the lobby is the field. Mixing them in
+would also mean every client stamping bot splits on its own race clock, so
+the standings would disagree between players. Human opponents appear on the
+live scoreboard on the same terms as anyone else.
+
 ## Deploying to Vercel
 
 Vercel auto-detects the Vite setup; `vercel.json` pins it explicitly. Push the
@@ -349,6 +413,8 @@ src/
   world/    Track generation, collision, obstacle rendering, sky/lighting
   race/     Checkpoint rules and timing; gate visuals and racing line;
             bots, standings, power-ups, pickups and projectiles
+  net/      Adapter contract, peer rendering, Cloudflare relay client
+server/     Cloudflare Worker + Durable Object relay, and its protocol tests
   ui/       HUD panels, modals, compass, altitude tape, scoreboard, indicator
   net/      Networking interface, remote drone interpolation
 public/

@@ -32,6 +32,13 @@ const EFFECT_LABELS = {
   PHASE: { label: 'Phase', color: '#3d9bff' },
 };
 
+/** Names come from other players, so they are escaped before display. */
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
 function ordinal(n) {
   const suffix = n % 100 >= 11 && n % 100 <= 13 ? 'th'
     : ['th', 'st', 'nd', 'rd'][n % 10] ?? 'th';
@@ -356,7 +363,7 @@ export class HUD {
     this.root.classList.remove('modal-open');
   }
 
-  showStart({ seed, colorIndex, theme, botCount, onStart, onSeed, onColor, onTheme, onBots, onCopyLink }) {
+  showStart({ seed, colorIndex, theme, botCount, online, name, onStart, onSeed, onColor, onTheme, onBots, onCopyLink, onHost, onJoin, onName }) {
     const swatches = PLAYER_COLORS.map((c, i) => `
       <div class="sw" role="radio" tabindex="0" data-color="${i}"
            aria-checked="${i === colorIndex}" title="${c.name}"
@@ -382,6 +389,15 @@ export class HUD {
             <input type="text" data-seed value="${seed}" spellcheck="false" />
             <button data-reseed>Randomise</button>
             <button data-copy>Copy link</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="label">Pilot name</div>
+          <div class="row">
+            <input type="text" data-name value="${escapeHtml(name ?? '')}"
+                   maxlength="16" spellcheck="false" />
+            <span style="font-size:11px;color:var(--dim)">Shown to other players</span>
           </div>
         </div>
 
@@ -418,13 +434,28 @@ export class HUD {
         </div>
 
         <div class="row">
-          <button class="primary" data-start>Start race &nbsp;&rarr;</button>
+          <button class="primary" data-start>Start solo &nbsp;&rarr;</button>
+          ${online
+            ? `<button data-host>Create online race</button>
+               <input type="text" data-joincode placeholder="ROOM CODE" maxlength="5"
+                      style="width:120px;text-transform:uppercase" spellcheck="false" />
+               <button data-join>Join</button>`
+            : '<span style="font-size:11.5px;color:var(--dim)">Online play needs a relay URL in src/config.js</span>'}
         </div>
       </div>
     `);
 
     const seedInput = modal.querySelector('[data-seed]');
-    modal.querySelector('[data-start]').onclick = () => onStart(seedInput.value.trim() || seed);
+    const nameInput = modal.querySelector('[data-name]');
+    // Commit the name on the way out of the field, so it is set before any
+    // button that sends it to the relay is clicked.
+    nameInput.onchange = () => onName(nameInput.value);
+    nameInput.onkeydown = (e) => e.stopPropagation();
+    const commitName = () => onName(nameInput.value);
+    modal.querySelector('[data-start]').onclick = () => {
+      commitName();
+      onStart(seedInput.value.trim() || seed);
+    };
     modal.querySelector('[data-reseed]').onclick = () => { seedInput.value = onSeed(); };
     modal.querySelector('[data-copy]').onclick = async (e) => {
       const ok = await onCopyLink(seedInput.value.trim() || seed);
@@ -458,6 +489,110 @@ export class HUD {
       if (e.key === 'Enter') onStart(seedInput.value.trim() || seed);
       e.stopPropagation();
     };
+
+    if (online) {
+      modal.querySelector('[data-host]').onclick = () => {
+        commitName();
+        onHost(seedInput.value.trim() || seed);
+      };
+      const codeInput = modal.querySelector('[data-joincode]');
+      const join = () => {
+        commitName();
+        const code = codeInput.value.trim().toUpperCase();
+        if (code) onJoin(code);
+      };
+      modal.querySelector('[data-join]').onclick = join;
+      codeInput.onkeydown = (e) => {
+        if (e.key === 'Enter') join();
+        e.stopPropagation();
+      };
+    }
+  }
+
+  /**
+   * The online lobby.
+   *
+   * Re-rendered wholesale on every roster change. That is fine here and not
+   * in the scoreboard: this screen updates a handful of times a minute rather
+   * than several times a second, and it owns focusable controls whose handlers
+   * are simpler to rebind than to reconcile.
+   */
+  showLobby({
+    room, seed, players, selfId, isHost, status, canStart,
+    onReady, onStartRace, onSeed, onCopyInvite, onLeave,
+  }) {
+    const me = players.find((p) => p.id === selfId);
+    const rows = players.map((p) => `
+      <div class="lobby-row${p.id === selfId ? ' me' : ''}">
+        <span class="sb-dot" style="background:#${p.color.toString(16).padStart(6, '0')}"></span>
+        <span class="lobby-name">${escapeHtml(p.name)}${p.host ? ' <i>host</i>' : ''}</span>
+        <span class="lobby-state ${p.ready ? 'on' : ''}">${p.ready ? 'Ready' : 'Waiting'}</span>
+      </div>
+    `).join('');
+
+    const statusText = {
+      connecting: 'Connecting…',
+      reconnecting: 'Reconnecting…',
+      connected: `${players.length} of 8 in the lobby`,
+      disconnected: 'Connection lost — retrying',
+      failed: 'Could not reach the relay',
+      rejected: 'That room is full',
+    }[status] ?? status;
+
+    const modal = this._openModal(`
+      <div class="card">
+        <div class="tag">Online lobby</div>
+        <h2>Room <span style="color:var(--accent);font-family:var(--mono)">${escapeHtml(room)}</span></h2>
+        <p style="margin-bottom:14px">${statusText}</p>
+
+        <div class="field">
+          <div class="label">Invite link</div>
+          <div class="row"><button data-invite>Copy invite link</button></div>
+        </div>
+
+        <div class="field">
+          <div class="label">Course seed${isHost ? '' : ' (set by the host)'}</div>
+          <div class="row">
+            <input type="text" data-lobbyseed value="${escapeHtml(seed ?? '')}"
+                   spellcheck="false" ${isHost ? '' : 'disabled'} />
+            ${isHost ? '<button data-setseed>Change course</button>' : ''}
+          </div>
+        </div>
+
+        <div class="label">Pilots</div>
+        <div class="lobby-rows">${rows}</div>
+
+        <div class="row">
+          ${isHost
+            ? `<button class="primary" data-startrace ${canStart ? '' : 'disabled'}>
+                 Start race${canStart ? '' : ' — waiting for everyone'}
+               </button>`
+            : `<button class="primary" data-ready>${me?.ready ? 'Not ready' : "I'm ready"}</button>`}
+          <button data-leave>Leave</button>
+        </div>
+      </div>
+    `);
+
+    modal.querySelector('[data-invite]').onclick = async (e) => {
+      const copied = await onCopyInvite();
+      e.target.textContent = copied ? 'Copied' : 'Copy failed';
+      setTimeout(() => { e.target.textContent = 'Copy invite link'; }, 1600);
+    };
+    modal.querySelector('[data-leave]').onclick = onLeave;
+
+    const seedInput = modal.querySelector('[data-lobbyseed]');
+    seedInput.onkeydown = (e) => e.stopPropagation();
+    if (isHost) {
+      const apply = () => {
+        const v = seedInput.value.trim();
+        if (v) onSeed(v);
+      };
+      modal.querySelector('[data-setseed]').onclick = apply;
+      const startBtn = modal.querySelector('[data-startrace]');
+      if (canStart) startBtn.onclick = onStartRace;
+    } else {
+      modal.querySelector('[data-ready]').onclick = () => onReady(!me?.ready);
+    }
   }
 
   /**

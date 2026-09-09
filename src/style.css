@@ -345,6 +345,36 @@ input[type="text"]:focus { outline: none; border-color: var(--accent); }
 .sw:hover { transform: scale(1.12); }
 .sw[aria-checked="true"] { border-color: var(--ink); }
 
+/* ── online lobby ──────────────────────────────────────────────────────── */
+.lobby-rows {
+  border-top: 1px solid var(--line);
+  margin: 4px 0 20px;
+  max-height: 200px; overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(120, 160, 210, 0.45) transparent;
+}
+.lobby-row {
+  display: grid; grid-template-columns: 8px 1fr auto;
+  align-items: center; gap: 10px;
+  padding: 8px 2px;
+  border-bottom: 1px solid rgba(120, 160, 210, 0.1);
+  font-size: 12.5px;
+}
+.lobby-row.me { color: var(--ink); box-shadow: inset 2px 0 0 var(--accent); padding-left: 8px; }
+.lobby-name { color: var(--ink); }
+.lobby-name i {
+  font-style: normal; font-size: 9.5px; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--warn); margin-left: 6px;
+}
+.lobby-state {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--dim);
+}
+.lobby-state.on { color: var(--accent); }
+
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button:disabled:hover { background: rgba(255, 255, 255, 0.05); }
+
 .splits {
   max-height: 216px; overflow-y: auto; margin: 4px 0 20px;
   border-top: 1px solid var(--line);

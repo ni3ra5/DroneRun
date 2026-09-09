@@ -1,0 +1,16 @@
+name = "dronerun-relay"
+main = "src/index.js"
+compatibility_date = "2026-03-01"
+
+# One Durable Object per race room.
+[[durable_objects.bindings]]
+name = "RACE_ROOMS"
+class_name = "RaceRoom"
+
+# SQLite-backed Durable Objects, which is what the free plan provides.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RaceRoom"]
+
+[observability]
+enabled = true

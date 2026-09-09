@@ -1,0 +1,15 @@
+{
+  "name": "dronerun-server",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --port 8787",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "test": "node scripts/protocol-test.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.130.0"
+  }
+}

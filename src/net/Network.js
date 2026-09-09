@@ -78,11 +78,21 @@ export class RemoteFleet {
   get count() { return this.peers.size; }
 
   attach(adapter) {
+    // Detach first so swapping adapters — going online, then leaving — cannot
+    // leave the previous one's listeners feeding this fleet.
+    this.detach();
     this._off = [
       adapter.on('join', (p) => this.add(p)),
       adapter.on('leave', (p) => this.remove(p.id)),
       adapter.on('state', (p) => this.applyState(p)),
     ];
+    return this;
+  }
+
+  detach() {
+    if (this._off) for (const off of this._off) off();
+    this._off = null;
+    this.clear();
     return this;
   }
 
@@ -151,8 +161,7 @@ export class RemoteFleet {
   }
 
   dispose() {
-    if (this._off) for (const off of this._off) off();
-    this.clear();
+    this.detach();
   }
 }
 

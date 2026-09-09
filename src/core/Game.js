@@ -2,8 +2,8 @@ import * as THREE from 'three';
 
 import { Input } from './Input.js';
 import { CameraRig } from './CameraRig.js';
-import { randomSeed } from './rng.js';
-import { readSeed, writeSeed, shareUrl } from './link.js';
+import { randomSeed, randomPilotName } from './rng.js';
+import { readSeed, writeSeed, shareUrl, readRoom, writeRoom, inviteUrl } from './link.js';
 
 import { DronePhysics } from '../drone/DronePhysics.js';
 import { DroneModel, PLAYER_COLORS } from '../drone/DroneModel.js';
@@ -23,13 +23,14 @@ import { Pickups } from '../race/Pickups.js';
 import { Projectiles } from '../race/Projectiles.js';
 import { POWER_UPS, Effects, rollPowerUp, applyHit } from '../race/PowerUps.js';
 import { makeRng } from './rng.js';
-import { FEATURES } from '../config.js';
+import { FEATURES, relayUrl, relayConfigured } from '../config.js';
 import { Gates } from '../race/Gates.js';
 
 import { HUD } from '../ui/HUD.js';
 import { Indicator } from '../ui/Indicator.js';
 
 import { LocalAdapter, RemoteFleet, SEND_HZ, makeStatePacket } from '../net/Network.js';
+import { CloudflareAdapter, makeRoomCode } from '../net/CloudflareAdapter.js';
 
 /**
  * Physics runs on a fixed 240 Hz step, decoupled from the render rate. A
@@ -43,7 +44,7 @@ const SOFT_BOUND = 520;   // metres from origin: warn
 const HARD_BOUND = 820;   // metres from origin: return to last gate
 
 export class Game {
-  constructor({ canvas, overlay, seed, colorIndex = 0, theme = 'night', botCount = 0 }) {
+  constructor({ canvas, overlay, seed, colorIndex = 0, theme = 'night', botCount = 0, name = null }) {
     this.canvas = canvas;
     this.seed = seed || randomSeed();
     this.colorIndex = colorIndex;
@@ -74,12 +75,27 @@ export class Game {
     this.input = new Input();
 
     // Networking seam — a no-op adapter today, see net/Network.js.
+    // The name is what other players see, in the lobby and above their
+    // drones. The local scoreboard still says "You" — that is clearer
+    // mid-race than reading your own callsign back at you.
     this.identity = {
       id: Math.random().toString(36).slice(2, 10),
-      name: 'You',
+      name: name || randomPilotName(),
       color: PLAYER_COLORS[this.colorIndex].hex,
     };
-    this.net = new LocalAdapter();
+    this.local = new LocalAdapter();
+    this.net = this.local;                 // the active adapter
+    this.online = null;                    // set while in an online room
+    this.lobby = null;                     // latest lobby snapshot for the UI
+    /**
+     * Race progress for network peers, keyed by id.
+     *
+     * State packets carry a peer's current gate, and their gate/finish events
+     * carry the split times — so standings can rank humans on exactly the
+     * same terms as the local player and the bots, rather than leaving them
+     * off the board.
+     */
+    this.peerProgress = new Map();
     this.fleet = new RemoteFleet(this.scene).attach(this.net);
     this.net.connect(this.seed, this.identity);
     this._sendAccum = 0;
@@ -220,7 +236,10 @@ export class Game {
   _buildBots() {
     for (const bot of this.bots) bot.dispose();
     this.bots = [];
-    if (this.botCount === 0) return;
+    // Online, the humans in the lobby are the field. Mixing in bots would
+    // also mean every client stamping bot splits on its own race clock, so
+    // the standings would disagree between players.
+    if (this.botCount === 0 || this.online) return;
 
     const colors = botColors(PLAYER_COLORS, this.colorIndex, this.botCount);
     for (let i = 0; i < this.botCount; i++) {
@@ -243,7 +262,16 @@ export class Game {
     try { localStorage.setItem('dronerun.bots', String(count)); } catch { /* ignore */ }
   }
 
-  /** Player + bots, ordered. */
+  _peerProgress(id) {
+    let p = this.peerProgress.get(id);
+    if (!p) {
+      p = { gate: 0, splits: [], finished: false, finishTime: null };
+      this.peerProgress.set(id, p);
+    }
+    return p;
+  }
+
+  /** Everyone racing: the local player, any bots, and any network peers. */
   _standings() {
     const entries = [{
       id: 'player',
@@ -256,6 +284,18 @@ export class Game {
       isPlayer: true,
     }];
     for (const bot of this.bots) entries.push(bot.progress);
+    for (const [id, peer] of this.fleet.peers) {
+      const p = this._peerProgress(id);
+      entries.push({
+        id,
+        name: peer.name ?? 'Pilot',
+        color: peer.model.color.getHex(),
+        gate: p.gate,
+        splits: p.splits,
+        finished: p.finished,
+        finishTime: p.finishTime,
+      });
+    }
     return computeStandings(entries);
   }
 
@@ -284,6 +324,13 @@ export class Game {
     try { localStorage.setItem('dronerun.theme', theme); } catch { /* ignore */ }
   }
 
+  setName(name) {
+    const clean = String(name ?? '').trim().slice(0, 16);
+    if (!clean || clean === this.identity.name) return;
+    this.identity.name = clean;
+    try { localStorage.setItem('dronerun.name', clean); } catch { /* ignore */ }
+  }
+
   setColor(index) {
     this.colorIndex = index;
     const hex = PLAYER_COLORS[index].hex;
@@ -296,10 +343,159 @@ export class Game {
 
   // ── flow ───────────────────────────────────────────────────────────────
 
+  // ── online play ────────────────────────────────────────────────────────
+
+  /**
+   * Join or create an online room.
+   *
+   * The adapter swap is the whole mechanism: `this.net` becomes the relay,
+   * the fleet re-attaches to it, and every existing call site — state sent at
+   * a fixed rate, gate and finish events, peer drones rendered and
+   * interpolated — keeps working untouched.
+   */
+  async goOnline(code, { create = false, seed = null } = {}) {
+    const base = relayUrl();
+    if (!base) {
+      this.hud.toast('No relay configured', '#ff4d7e');
+      return;
+    }
+
+    this.online?.disconnect();
+    const adapter = new CloudflareAdapter(base);
+    this.online = adapter;
+    this.net = adapter;
+    this.fleet.attach(adapter);
+
+    this.peerProgress.clear();
+    this._buildBots();          // clears any bots: online fields are human
+    this.lobby = { room: code, status: 'connecting', players: [], selfId: null, isHost: false, seed: seed ?? this.seed };
+    this._bindLobby(adapter);
+    this._renderLobby();
+
+    try {
+      const welcome = await adapter.connect(code, this.identity, { seed: seed ?? this.seed });
+      // The room's seed wins: everyone must be on the same course.
+      if (welcome.seed && welcome.seed !== this.seed) this.loadTrack(welcome.seed);
+      writeRoom(code, welcome.seed ?? this.seed);
+      this._renderLobby();
+    } catch {
+      this._renderLobby();
+    }
+  }
+
+  _bindLobby(adapter) {
+    const refresh = () => this._renderLobby();
+
+    adapter.on('roster', ({ players, selfId, isHost }) => {
+      Object.assign(this.lobby, { players, selfId, isHost });
+      refresh();
+    });
+    adapter.on('status', ({ state }) => {
+      this.lobby.status = state;
+      refresh();
+    });
+    adapter.on('seed', ({ seed }) => {
+      this.lobby.seed = seed;
+      // Never swap the course mid-race; the relay only sends this in a lobby.
+      if (this.race.state === RaceState.IDLE && seed !== this.seed) this.loadTrack(seed);
+      refresh();
+    });
+    adapter.on('start', () => {
+      // Each client runs its own countdown from here, which is what begin()
+      // already does — so the relay's signal maps straight onto it.
+      this.begin();
+    });
+    adapter.on('lobby', () => {
+      this.race.reset();
+      this._resetDrone();
+      this.gates.setNext(0);
+      this.music.pause();
+      this._renderLobby();
+    });
+    adapter.on('state', ({ id, gate }) => {
+      if (gate == null) return;
+      const p = this._peerProgress(id);
+      if (gate > p.gate) p.gate = gate;
+    });
+    adapter.on('event', ({ id, kind, payload }) => {
+      const p = this._peerProgress(id);
+      if (kind === 'gate' && Number.isFinite(payload?.split)) {
+        p.splits[payload.index] = payload.split;
+        p.gate = Math.max(p.gate, payload.index + 1);
+        return;
+      }
+      if (kind === 'finish') {
+        p.finished = true;
+        p.finishTime = payload?.time ?? null;
+        const peer = this.fleet.peers.get(id);
+        this.hud.toast(`${peer?.name ?? 'A rival'} finished`, '#35e6d0');
+      }
+    });
+    adapter.on('leave', ({ id }) => this.peerProgress.delete(id));
+  }
+
+  _renderLobby() {
+    if (!this.online || this.race.state !== RaceState.IDLE) return;
+    const l = this.lobby;
+    const others = l.players.filter((p) => p.id !== l.selfId);
+    // A solo host can start whenever; otherwise everyone else must be ready.
+    const canStart = l.isHost && others.every((p) => p.ready);
+
+    this.input.enabled = false;
+    this.hud.showLobby({
+      room: l.room,
+      seed: l.seed ?? this.seed,
+      players: l.players,
+      selfId: l.selfId,
+      isHost: l.isHost,
+      status: l.status,
+      canStart,
+      onReady: (ready) => this.online.setReady(ready),
+      onStartRace: () => this.online.startRace(),
+      onSeed: (seed) => this.online.setSeed(seed),
+      onCopyInvite: async () => {
+        try {
+          await navigator.clipboard.writeText(inviteUrl(l.room, l.seed ?? this.seed));
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      onLeave: () => this.leaveOnline(),
+    });
+  }
+
+  /** Drop out of the room and go back to solo play. */
+  leaveOnline() {
+    this.online?.disconnect();
+    this.online = null;
+    this.lobby = null;
+    this.net = this.local;
+    this.fleet.attach(this.local);
+    this.peerProgress.clear();
+    this._buildBots();          // bots come back for solo play
+    writeSeed(this.seed);
+    this.race.reset();
+    this._resetDrone();
+    this.gates.setNext(0);
+    this.showStart();
+  }
+
   /** Leave a race and return to the start screen. */
   mainMenu() {
     this._paused = false;
     this.hud.setStandings(null, 0);
+    if (this.online) {
+      // Online, the host controls when everyone comes back, so this is a
+      // request rather than a local decision.
+      this.race.reset();
+      this._resetDrone();
+      this.gates.setNext(0);
+      this.music.pause();
+      if (this.online.isHost) this.online.returnToLobby();
+      this._renderLobby();
+      return;
+    }
     this.race.paused = false;
     this.race.reset();
     this._resetDrone();
@@ -317,6 +513,11 @@ export class Game {
       colorIndex: this.colorIndex,
       theme: this.theme,
       botCount: this.botCount,
+      online: relayConfigured(),
+      name: this.identity.name,
+      onName: (n) => this.setName(n),
+      onHost: (seed) => this.goOnline(makeRoomCode(), { create: true, seed }),
+      onJoin: (code) => this.goOnline(code, { create: false }),
       onStart: (seed) => {
         if (seed !== this.seed) this.loadTrack(seed);
         this.begin();
@@ -345,6 +546,9 @@ export class Game {
     this.input.enabled = true;
     this._paused = false;
     this._resetDrone();
+    for (const p of this.peerProgress.values()) {
+      Object.assign(p, { gate: 0, splits: [], finished: false, finishTime: null });
+    }
     this.race.begin();
     this.gates.setNext(0);
     // A round always starts from a click or a keypress, so this call sits
@@ -782,6 +986,7 @@ export class Game {
     window.removeEventListener('hashchange', this._onHashChange);
     this._resizeObserver?.disconnect();
     this.input.dispose();
+    this.online?.disconnect();
     this.fleet.dispose();
     this.boostFx.dispose();
     this.projectiles?.dispose();

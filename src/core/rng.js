@@ -57,3 +57,14 @@ export function randomSeed() {
   const w = () => WORDS[Math.floor(r() * WORDS.length)];
   return `${w()}-${w()}-${Math.floor(r() * 900 + 100)}`;
 }
+
+const CALLSIGNS = [
+  'Ash', 'Bolt', 'Cinder', 'Dash', 'Echo', 'Flint', 'Ghost', 'Hawk',
+  'Iris', 'Jet', 'Kilo', 'Lark', 'Mesa', 'Nyx', 'Orbit', 'Quill',
+];
+
+/** A default pilot name, so nobody has to think of one to start playing. */
+export function randomPilotName() {
+  const word = CALLSIGNS[Math.floor(Math.random() * CALLSIGNS.length)];
+  return `${word}-${Math.floor(Math.random() * 90 + 10)}`;
+}

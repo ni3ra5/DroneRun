@@ -1,7 +1,7 @@
 import './style.css';
 import { Game } from './core/Game.js';
 import { randomSeed } from './core/rng.js';
-import { readSeed } from './core/link.js';
+import { readSeed, readRoom } from './core/link.js';
 import { PLAYER_COLORS } from './drone/DroneModel.js';
 
 function savedTheme() {
@@ -19,6 +19,15 @@ function savedBotCount() {
     return Number.isInteger(n) && n >= 0 && n <= 7 ? n : 0;
   } catch {
     return 0;
+  }
+}
+
+function savedName() {
+  try {
+    const n = localStorage.getItem('dronerun.name');
+    return n && n.trim() ? n.trim().slice(0, 16) : null;
+  } catch {
+    return null;
   }
 }
 
@@ -43,7 +52,11 @@ try {
     colorIndex: savedColorIndex(),
     theme: savedTheme(),
     botCount: savedBotCount(),
+    name: savedName(),
   });
+  // An invite link lands straight in the lobby.
+  const room = readRoom();
+  if (room) window.game.goOnline(room, { create: false });
 } catch (err) {
   console.error(err);
   overlay.innerHTML = `
