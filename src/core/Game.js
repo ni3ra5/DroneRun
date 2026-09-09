@@ -44,10 +44,15 @@ const SOFT_BOUND = 520;   // metres from origin: warn
 const HARD_BOUND = 820;   // metres from origin: return to last gate
 
 export class Game {
-  constructor({ canvas, overlay, seed, colorIndex = 0, theme = 'night', botCount = 0, name = null }) {
+  constructor({ canvas, overlay, seed, theme = 'night', botCount = 0, name = null }) {
     this.canvas = canvas;
     this.seed = seed || randomSeed();
-    this.colorIndex = colorIndex;
+    /**
+     * Palette slot for this player's drone. Not a preference: solo you are
+     * always slot 0 and the bots take the rest, and online the relay hands
+     * out slots so no two drones in a room share a colour.
+     */
+    this.colorIndex = 0;
     this.theme = THEMES[theme] ? theme : 'night';
     /**
      * Whether the current seed was deliberately chosen — from a link, or
@@ -346,21 +351,29 @@ export class Game {
     try { localStorage.setItem('dronerun.theme', theme); } catch { /* ignore */ }
   }
 
+  /**
+   * Repaint the local drone into a palette slot. Called with the slot the
+   * relay assigned on joining a room, and reset to 0 on leaving.
+   */
+  setColorIndex(index) {
+    const i = Number.isInteger(index) && index >= 0 && index < PLAYER_COLORS.length ? index : 0;
+    if (i === this.colorIndex) return;
+    this.colorIndex = i;
+    const hex = PLAYER_COLORS[i].hex;
+    this.identity.color = hex;
+    this.model.accentMaterial.color.setHex(hex);
+    this.model.accentMaterial.emissive.setHex(hex);
+    if (this.model.trail) this.model.trail.material.color.setHex(hex);
+    this.model.color.setHex(hex);
+    // Bot colours are derived from ours, so they have to move out of the way.
+    this._buildBots();
+  }
+
   setName(name) {
     const clean = String(name ?? '').trim().slice(0, 16);
     if (!clean || clean === this.identity.name) return;
     this.identity.name = clean;
     try { localStorage.setItem('dronerun.name', clean); } catch { /* ignore */ }
-  }
-
-  setColor(index) {
-    this.colorIndex = index;
-    const hex = PLAYER_COLORS[index].hex;
-    this.identity.color = hex;
-    this.model.accentMaterial.color.setHex(hex);
-    this.model.accentMaterial.emissive.setHex(hex);
-    if (this.model.trail) this.model.trail.material.color.setHex(hex);
-    try { localStorage.setItem('dronerun.color', String(index)); } catch { /* ignore */ }
   }
 
   // ── flow ───────────────────────────────────────────────────────────────
@@ -416,6 +429,10 @@ export class Game {
       for (const id of [...this.peerProgress.keys()]) {
         if (!present.has(id)) this.peerProgress.delete(id);
       }
+      refresh();
+    });
+    adapter.on('color', ({ index }) => {
+      this.setColorIndex(index);
       refresh();
     });
     adapter.on('status', ({ state }) => {
@@ -501,6 +518,7 @@ export class Game {
     this.net = this.local;
     this.fleet.attach(this.local);
     this.peerProgress.clear();
+    this.setColorIndex(0);      // back to the solo slot
     this._buildBots();          // bots come back for solo play
     writeSeed(this.seed);
     this.race.reset();
@@ -537,7 +555,6 @@ export class Game {
     this.music.pause();
     this.hud.setMuted(this.music.muted);
     this.hud.showStart({
-      colorIndex: this.colorIndex,
       theme: this.theme,
       botCount: this.botCount,
       online: relayConfigured(),
@@ -553,7 +570,6 @@ export class Game {
         this.begin();
       },
 
-      onColor: (i) => this.setColor(i),
       onTheme: (t) => this.setTheme(t),
       onBots: (n) => this.setBotCount(n),
     });

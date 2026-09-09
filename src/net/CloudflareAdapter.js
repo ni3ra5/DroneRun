@@ -1,4 +1,5 @@
 import { NetworkAdapter } from './Network.js';
+import { PLAYER_COLORS } from '../drone/DroneModel.js';
 
 /**
  * WebSocket adapter for the Cloudflare Durable Object relay in `server/`.
@@ -11,6 +12,11 @@ import { NetworkAdapter } from './Network.js';
  * Beyond the three events RemoteFleet consumes ('join', 'leave', 'state') it
  * also emits the lobby's events: 'roster', 'seed', 'start', 'lobby', 'full',
  * 'status' and 'event'.
+ *
+ * The relay assigns each player a palette slot so no two drones in a room
+ * share a colour. It sends the slot index, not a colour value — the palette
+ * itself stays in the client, in one place. This adapter resolves index to
+ * colour on the way in, so everything downstream still just sees a colour.
  *
  * Reconnection is deliberate rather than automatic-and-silent: a dropped
  * socket mid-race emits 'status' so the UI can say so, and retries with
@@ -44,6 +50,15 @@ export class CloudflareAdapter extends NetworkAdapter {
   get connected() { return this._open; }
   get peerCount() { return Math.max(0, this.players.length - 1); }
   get isHost() { return this.players.find((p) => p.id === this.selfId)?.host === true; }
+
+  /** Palette slot -> colour, with a safe fallback for an unexpected index. */
+  static colorFor(index) {
+    return PLAYER_COLORS[index]?.hex ?? PLAYER_COLORS[0].hex;
+  }
+
+  _withColors(players) {
+    return players.map((p) => ({ ...p, color: CloudflareAdapter.colorFor(p.colorIndex) }));
+  }
 
   /**
    * @param {string} room room code
@@ -83,7 +98,6 @@ export class CloudflareAdapter extends NetworkAdapter {
       this._send({
         t: 'hello',
         name: this.identity.name,
-        color: this.identity.color,
         seed: this._proposedSeed ?? undefined,
       });
     });
@@ -132,10 +146,14 @@ export class CloudflareAdapter extends NetworkAdapter {
     switch (msg.t) {
       case 'welcome':
         this.selfId = msg.you;
+        this.colorIndex = msg.yourColorIndex ?? 0;
         this.seed = msg.seed;
         this.phase = msg.phase;
-        this.players = msg.players ?? [];
+        this.players = this._withColors(msg.players ?? []);
         this.emit('status', { state: 'connected' });
+        // The room decided our colour, so tell the game before the roster —
+        // it needs to repaint the local drone.
+        this.emit('color', { index: this.colorIndex, color: CloudflareAdapter.colorFor(this.colorIndex) });
         this.emit('roster', { players: this.players, selfId: this.selfId, isHost: this.isHost });
         this.emit('seed', { seed: msg.seed });
         this._welcomeResolve?.(msg);
@@ -144,13 +162,15 @@ export class CloudflareAdapter extends NetworkAdapter {
         break;
 
       case 'roster':
-        this.players = msg.players ?? [];
+        this.players = this._withColors(msg.players ?? []);
         this.emit('roster', { players: this.players, selfId: this.selfId, isHost: this.isHost });
         break;
 
       case 'join':
         // RemoteFleet creates the peer's drone from this.
-        this.emit('join', { id: msg.id, name: msg.name, color: msg.color });
+        this.emit('join', {
+          id: msg.id, name: msg.name, color: CloudflareAdapter.colorFor(msg.colorIndex),
+        });
         break;
 
       case 'leave':
@@ -158,7 +178,7 @@ export class CloudflareAdapter extends NetworkAdapter {
         break;
 
       case 'state':
-        this.emit('state', msg);
+        this.emit('state', { ...msg, color: CloudflareAdapter.colorFor(msg.colorIndex) });
         break;
 
       case 'event':

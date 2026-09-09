@@ -2,7 +2,6 @@ import './style.css';
 import { Game } from './core/Game.js';
 import { randomSeed } from './core/rng.js';
 import { readSeed, readRoom } from './core/link.js';
-import { PLAYER_COLORS } from './drone/DroneModel.js';
 
 function savedTheme() {
   try {
@@ -31,16 +30,6 @@ function savedName() {
   }
 }
 
-function savedColorIndex() {
-  try {
-    const raw = localStorage.getItem('dronerun.color');
-    const i = raw == null ? 0 : Number(raw);
-    return Number.isInteger(i) && i >= 0 && i < PLAYER_COLORS.length ? i : 0;
-  } catch {
-    return 0;
-  }
-}
-
 const canvas = document.getElementById('scene');
 const overlay = document.getElementById('overlay');
 
@@ -49,7 +38,6 @@ try {
     canvas,
     overlay,
     seed: readSeed() ?? randomSeed(),
-    colorIndex: savedColorIndex(),
     theme: savedTheme(),
     botCount: savedBotCount(),
     name: savedName(),

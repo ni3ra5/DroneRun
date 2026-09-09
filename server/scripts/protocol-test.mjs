@@ -136,6 +136,43 @@ ok(afterLeave?.length === 1 && afterLeave[0].name === 'Bo' && afterLeave[0].host
    'the remaining player is promoted to host',
    `host is ${afterLeave?.find((p) => p.host)?.name}`);
 
+// ── colour assignment ─────────────────────────────────────────────────
+// Colours are handed out by the room, not chosen by players, so no two
+// drones in a lobby can look alike.
+{
+  const roomC = `C${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
+  const crowd2 = [];
+  for (let i = 0; i < 8; i++) {
+    const p = new Peer(roomC, `C${i}`, 0);
+    await p.ready;
+    // Deliberately all ask for the same colour; the room must ignore it.
+    p.send({ t: 'hello', name: `C${i}`, color: 0x35e6d0 });
+    const w = await p.expect('welcome');
+    p.slot = w.yourColorIndex;
+    crowd2.push(p);
+  }
+  const slots = crowd2.map((p) => p.slot);
+  ok(new Set(slots).size === 8, 'a full room gets eight distinct colours',
+     `slots ${slots.sort((a, b) => a - b).join(',')}`);
+  ok(slots.every((n) => Number.isInteger(n) && n >= 0 && n < 8),
+     'every assigned slot is within the palette');
+
+  // A departure frees its slot for the next joiner.
+  const freed = crowd2[3].slot;
+  crowd2[3].close();
+  await settle(500);
+  const replacement = new Peer(roomC, 'Late', 0);
+  await replacement.ready;
+  replacement.send({ t: 'hello', name: 'Late' });
+  const lateWelcome = await replacement.expect('welcome');
+  ok(lateWelcome.yourColorIndex === freed,
+     'a departed player frees its colour for the next joiner',
+     `reused slot ${lateWelcome.yourColorIndex}`);
+
+  for (const p of [...crowd2, replacement]) p.close();
+  await settle(200);
+}
+
 // ── capacity ──────────────────────────────────────────────────────────
 const crowd = [];
 for (let i = 0; i < 7; i++) {

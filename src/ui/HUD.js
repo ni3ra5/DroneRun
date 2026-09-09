@@ -1,5 +1,4 @@
 import { formatTime, formatDelta } from '../race/Race.js';
-import { PLAYER_COLORS } from '../drone/DroneModel.js';
 import { Compass } from './Compass.js';
 import { AltitudeTape } from './AltitudeTape.js';
 import { Scoreboard } from './Scoreboard.js';
@@ -363,13 +362,7 @@ export class HUD {
     this.root.classList.remove('modal-open');
   }
 
-  showStart({ colorIndex, theme, botCount, online, name, seedIsExplicit, onStart, onColor, onTheme, onBots, onHost, onJoin, onName, onStartRandom }) {
-    const swatches = PLAYER_COLORS.map((c, i) => `
-      <div class="sw" role="radio" tabindex="0" data-color="${i}"
-           aria-checked="${i === colorIndex}" title="${c.name}"
-           style="background:#${c.hex.toString(16).padStart(6, '0')}"></div>
-    `).join('');
-
+  showStart({ theme, botCount, online, name, seedIsExplicit, onStart, onTheme, onBots, onHost, onJoin, onName, onStartRandom }) {
     const keymap = KEYMAP_ROWS.map(([k, d]) => `<div>${k}</div><b>${d}</b>`).join('');
 
     const modal = this._openModal(`
@@ -390,11 +383,6 @@ export class HUD {
                    maxlength="16" spellcheck="false" />
             <span style="font-size:11px;color:var(--dim)">Shown to other players</span>
           </div>
-        </div>
-
-        <div class="field">
-          <div class="label">Drone colour</div>
-          <div class="swatches">${swatches}</div>
         </div>
 
         <div class="field">
@@ -467,15 +455,6 @@ export class HUD {
         btn.setAttribute('aria-checked', 'true');
         onTheme(btn.dataset.theme);
       };
-    });
-    modal.querySelectorAll('[data-color]').forEach((sw) => {
-      const pick = () => {
-        modal.querySelectorAll('[data-color]').forEach((o) => o.setAttribute('aria-checked', 'false'));
-        sw.setAttribute('aria-checked', 'true');
-        onColor(Number(sw.dataset.color));
-      };
-      sw.onclick = pick;
-      sw.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } };
     });
     if (online) {
       modal.querySelector('[data-host]').onclick = () => {

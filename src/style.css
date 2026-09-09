@@ -337,14 +337,6 @@ input[type="text"]:focus { outline: none; border-color: var(--accent); }
   background: rgba(255, 255, 255, 0.06); color: var(--ink);
 }
 
-.swatches { display: flex; gap: 7px; }
-.sw {
-  width: 30px; height: 30px; border: 2px solid transparent; cursor: pointer;
-  position: relative; transition: transform 0.1s;
-}
-.sw:hover { transform: scale(1.12); }
-.sw[aria-checked="true"] { border-color: var(--ink); }
-
 /* ── online lobby ──────────────────────────────────────────────────────── */
 .lobby-rows {
   border-top: 1px solid var(--line);

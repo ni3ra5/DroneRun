@@ -22,6 +22,13 @@
  * player per tick.
  */
 
+/**
+ * Room capacity, which is deliberately the same as the number of colours in
+ * the client's palette (see PLAYER_COLORS in drone/DroneModel.js). Colours
+ * are assigned here rather than chosen by players, so that every drone in a
+ * room is a different colour — and because the room is the only place that
+ * can know what is already taken.
+ */
 const MAX_PLAYERS = 8;
 const COUNTDOWN_MS = 3000;
 
@@ -86,7 +93,7 @@ export class RaceRoom {
       id: crypto.randomUUID().slice(0, 8),
       seq,
       name: null,
-      color: null,
+      colorIndex: null,   // assigned on hello, once we know who else is here
       ready: false,
     });
 
@@ -121,10 +128,26 @@ export class RaceRoom {
     return roster.map(({ meta }) => ({
       id: meta.id,
       name: meta.name,
-      color: meta.color,
+      colorIndex: meta.colorIndex,
       ready: meta.ready,
       host: meta.id === hostId,
     }));
+  }
+
+  /**
+   * Lowest palette slot nobody in the room is using.
+   *
+   * Capacity equals the palette size, so a slot is always available for
+   * anyone the room actually admits.
+   */
+  _freeColorIndex(exclude = null) {
+    const taken = new Set(
+      this._roster(exclude).map((e) => e.meta.colorIndex).filter((i) => i != null),
+    );
+    for (let i = 0; i < MAX_PLAYERS; i++) {
+      if (!taken.has(i)) return i;
+    }
+    return 0;   // unreachable while capacity matches the palette
   }
 
   _send(ws, msg) {
@@ -163,7 +186,9 @@ export class RaceRoom {
       case 'hello': {
         // Identify, then tell this player about the room and everyone else.
         meta.name = String(msg.name ?? 'Pilot').slice(0, 16);
-        meta.color = Number.isFinite(msg.color) ? msg.color : 0x35e6d0;
+        // The client does not get to choose: colours are handed out here so
+        // no two drones in a room can look alike.
+        meta.colorIndex = this._freeColorIndex(ws);
         meta.ready = false;
         ws.serializeAttachment(meta);
 
@@ -179,13 +204,16 @@ export class RaceRoom {
         this._send(ws, {
           t: 'welcome',
           you: meta.id,
+          yourColorIndex: meta.colorIndex,
           seed,
           phase,
           host: this._hostId(roster),
           players: this._players(roster),
         });
-        this._broadcast({ t: 'join', id: meta.id, name: meta.name, color: meta.color },
-          { exceptId: meta.id });
+        this._broadcast(
+          { t: 'join', id: meta.id, name: meta.name, colorIndex: meta.colorIndex },
+          { exceptId: meta.id },
+        );
         this._broadcastRoster();
         return;
       }
@@ -244,7 +272,7 @@ export class RaceRoom {
           t: 'state',
           id: meta.id,
           name: meta.name,
-          color: meta.color,
+          colorIndex: meta.colorIndex,
           p: msg.p,
           q: msg.q,
           gate: msg.gate,
