@@ -132,12 +132,25 @@ export class Game {
       this._resizeObserver.observe(this.canvas.parentElement ?? this.canvas);
     }
 
-    // Pasting a shared link into an already-open tab only changes the hash,
-    // which does not reload the page. Pick the new track up anyway, or the
-    // link silently does nothing for anyone who already has the game open.
+    // Pasting a link into an already-open tab only changes the hash, which
+    // does not reload the page. Pick it up anyway, or the link silently does
+    // nothing for anyone who already has the game open.
+    //
+    // The room has to be handled as well as the seed: an invite carries both,
+    // and looking only at the seed meant pasting a *different* invite loaded
+    // that course but left you sitting in the previous room.
+    //
+    // Note that writeSeed and writeRoom use replaceState, which does not fire
+    // hashchange — so this cannot loop back on itself.
     this._onHashChange = () => {
+      const room = readRoom();
+      if (room && room !== this.online?.room) {
+        this.goOnline(room, { create: false });
+        return;
+      }
       const seed = readSeed();
       if (!seed || seed === this.seed) return;
+      this._seedIsExplicit = true;
       this.loadTrack(seed);
       this.showStart();
     };
