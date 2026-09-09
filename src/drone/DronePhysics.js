@@ -40,13 +40,20 @@ export const TUNING = {
   // is what produces the extra horizontal acceleration, and holding altitude
   // at a steeper lean costs more thrust (mg / cos θ). Raising tilt alone
   // would just make the drone sink while it accelerated.
-  boostTilt: 1.45,            // 38° -> 55°, roughly doubling horizontal accel
-  boostThrust: 1.5,           // enough headroom to hold height at that lean
+  // Boost widens the envelope: 38° -> 63° of lean roughly doubles both
+  // acceleration and top speed (21 -> 47 km/h at one second, 57 -> 120 km/h
+  // flat out), and the thrust multiplier keeps it able to hold altitude there.
+  boostTilt: 1.65,
+  boostThrust: 2.3,           // enough headroom to hold height at that lean
   maxYawRate: 2.6,            // rad/s
   maxClimbRate: 6.5,          // m/s
   climbKp: 3.2,               // (m/s²) per (m/s) of climb-rate error
   climbKi: 2.4,               // integral term — see the note in step()
-  climbIClamp: 5,             // anti-windup bound on the integrator
+  // Anti-windup bound on the vertical integrator. This, not thrust, is what
+  // limits whether the craft can hold altitude at full boost lean: the
+  // controller can only ask for g + climbKi * climbIClamp of vertical
+  // acceleration, so raising maxRotorThrust alone changes nothing at all.
+  climbIClamp: 9,
 
   // Inner loop: gains are in angular-acceleration terms (rad/s² per rad).
   // ωn ≈ 10.5 rad/s, ζ ≈ 0.76 — snappy but without overshoot ringing.

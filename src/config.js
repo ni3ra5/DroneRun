@@ -7,6 +7,16 @@
  * feature stays in the tree and stays covered by `npm run verify`, so it does
  * not rot while switched off.
  */
+/**
+ * Render layer for objects that glow.
+ *
+ * Bloom is isolated by layer rather than by brightness: only the drones'
+ * coloured shells are on it, so gates, light strips and anything else bright
+ * render normally. A luminance threshold cannot express that — a gate ring is
+ * every bit as bright as a shell, so it would bloom too.
+ */
+export const BLOOM_LAYER = 1;
+
 export const FEATURES = {
   /**
    * Power-ups: pickup crates on the course, the item slot, Space to fire,

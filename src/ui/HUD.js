@@ -363,7 +363,7 @@ export class HUD {
     this.root.classList.remove('modal-open');
   }
 
-  showStart({ seed, colorIndex, theme, botCount, online, name, onStart, onSeed, onColor, onTheme, onBots, onCopyLink, onHost, onJoin, onName }) {
+  showStart({ seed, colorIndex, theme, botCount, online, name, seedIsExplicit, onStart, onSeed, onColor, onTheme, onBots, onCopyLink, onHost, onJoin, onName, onStartRandom }) {
     const swatches = PLAYER_COLORS.map((c, i) => `
       <div class="sw" role="radio" tabindex="0" data-color="${i}"
            aria-checked="${i === colorIndex}" title="${c.name}"
@@ -389,6 +389,10 @@ export class HUD {
             <input type="text" data-seed value="${seed}" spellcheck="false" />
             <button data-reseed>Randomise</button>
             <button data-copy>Copy link</button>
+          </div>
+          <div style="font-size:11px;color:var(--dim);margin-top:6px">
+            Every start rolls a new course. Type a seed here to race a
+            specific one.
           </div>
         </div>
 
@@ -434,7 +438,10 @@ export class HUD {
         </div>
 
         <div class="row">
-          <button class="primary" data-start>Start solo &nbsp;&rarr;</button>
+          ${seedIsExplicit
+            ? `<button class="primary" data-start>Race this course &nbsp;&rarr;</button>
+               <button data-random>New random course</button>`
+            : '<button class="primary" data-start>Start solo &nbsp;&rarr;</button>'}
           ${online
             ? `<button data-host>Create online race</button>
                <input type="text" data-joincode placeholder="ROOM CODE" maxlength="5"
@@ -456,6 +463,11 @@ export class HUD {
       commitName();
       onStart(seedInput.value.trim() || seed);
     };
+    // Only shown when a specific seed arrived from a link.
+    modal.querySelector('[data-random]')?.addEventListener('click', () => {
+      commitName();
+      onStartRandom();
+    });
     modal.querySelector('[data-reseed]').onclick = () => { seedInput.value = onSeed(); };
     modal.querySelector('[data-copy]').onclick = async (e) => {
       const ok = await onCopyLink(seedInput.value.trim() || seed);

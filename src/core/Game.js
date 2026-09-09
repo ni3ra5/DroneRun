@@ -1,4 +1,9 @@
 import * as THREE from 'three';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 
 import { Input } from './Input.js';
 import { CameraRig } from './CameraRig.js';
@@ -23,7 +28,7 @@ import { Pickups } from '../race/Pickups.js';
 import { Projectiles } from '../race/Projectiles.js';
 import { POWER_UPS, Effects, rollPowerUp, applyHit } from '../race/PowerUps.js';
 import { makeRng } from './rng.js';
-import { FEATURES, relayUrl, relayConfigured } from '../config.js';
+import { FEATURES, relayUrl, relayConfigured, BLOOM_LAYER } from '../config.js';
 import { Gates } from '../race/Gates.js';
 
 import { HUD } from '../ui/HUD.js';
@@ -40,6 +45,12 @@ import { CloudflareAdapter, makeRoomCode } from '../net/CloudflareAdapter.js';
 const FIXED_DT = 1 / 240;
 const MAX_SUBSTEPS = 30;
 
+/**
+ * Resting emissive on a drone's coloured shell: enough to cross the bloom
+ * threshold and glow, without washing the colour out to white.
+ */
+export const SHELL_GLOW = 1.15;
+
 const SOFT_BOUND = 520;   // metres from origin: warn
 const HARD_BOUND = 820;   // metres from origin: return to last gate
 
@@ -49,6 +60,15 @@ export class Game {
     this.seed = seed || randomSeed();
     this.colorIndex = colorIndex;
     this.theme = THEMES[theme] ? theme : 'night';
+    /**
+     * Whether the current seed was deliberately chosen — from a link, or
+     * typed into the seed field — as opposed to generated for us.
+     *
+     * Starting a solo race normally rolls a brand new course, so no two runs
+     * are the same. But a seed someone went to the trouble of sharing should
+     * still be raceable, so an explicit one is honoured for its first start.
+     */
+    this._seedIsExplicit = Boolean(readSeed());
     this.botCount = Math.max(0, Math.min(7, botCount | 0));
     this.bots = [];
 
@@ -59,6 +79,7 @@ export class Game {
     this._onResize();
     this.environment = new Environment(this.scene, this.renderer, this.theme);
     this.rig = new CameraRig(this.camera);
+    this._buildComposer();
 
     this.body = new DronePhysics();
     this.boost = new Boost();
@@ -140,6 +161,112 @@ export class Game {
 
   // ── setup ──────────────────────────────────────────────────────────────
 
+  /**
+   * Post-processing chain: the glow on the coloured drone shells.
+   *
+   * The glow is isolated **by layer**, not by brightness. A luminance
+   * threshold cannot express what is wanted here — a gate ring is every bit
+   * as bright as a drone shell, so thresholding blooms the gates too, and a
+   * pulsing amber ring blown out by bloom swamps the whole frame.
+   *
+   * So there are two passes over the scene:
+   *
+   *   1. Everything not on the bloom layer is swapped to flat black, the
+   *      scene is rendered into an offscreen target, and that is blurred.
+   *      Swapping to black rather than skipping those objects is what keeps
+   *      occlusion honest — a drone behind a tower must not glow through it.
+   *   2. The materials are restored, the scene renders normally, and the
+   *      blurred target is added on top.
+   *
+   * Tone mapping happens last, in OutputPass. three.js disables it when
+   * rendering into a render target, so both passes work in linear HDR and the
+   * ACES curve is applied once, to the composited result.
+   */
+  _buildComposer() {
+    const { width, height } = this._viewport();
+
+    this._bloomLayer = new THREE.Layers();
+    this._bloomLayer.set(BLOOM_LAYER);
+    this._darkMaterial = new THREE.MeshBasicMaterial({ color: 0x000000 });
+    /** @type {Map<THREE.Object3D, THREE.Material>} */
+    this._savedMaterials = new Map();
+    this._darken = (obj) => {
+      if (!obj.material) return;
+      if (this._bloomLayer.test(obj.layers)) return;
+      this._savedMaterials.set(obj, obj.material);
+      obj.material = this._darkMaterial;
+    };
+
+    const b = this.environment.bloom ?? { strength: 1.15, radius: 0.55 };
+
+    // Pass 1: the glowing objects alone, blurred.
+    this.bloomComposer = new EffectComposer(this.renderer);
+    this.bloomComposer.renderToScreen = false;
+    this.bloomComposer.addPass(new RenderPass(this.scene, this.camera));
+    this.bloomPass = new UnrealBloomPass(
+      new THREE.Vector2(width, height), b.strength, b.radius, 0,
+    );
+    this.bloomComposer.addPass(this.bloomPass);
+
+    // Pass 2: the real scene, with the blur added over it.
+    this.composer = new EffectComposer(this.renderer);
+    this.composer.addPass(new RenderPass(this.scene, this.camera));
+    this._combinePass = new ShaderPass(
+      new THREE.ShaderMaterial({
+        uniforms: {
+          baseTexture: { value: null },
+          bloomTexture: { value: this.bloomComposer.renderTarget2.texture },
+        },
+        vertexShader: /* glsl */`
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: /* glsl */`
+          uniform sampler2D baseTexture;
+          uniform sampler2D bloomTexture;
+          varying vec2 vUv;
+          void main() {
+            gl_FragColor = texture2D(baseTexture, vUv) + texture2D(bloomTexture, vUv);
+          }
+        `,
+        defines: {},
+      }),
+      'baseTexture',
+    );
+    this._combinePass.needsSwap = true;
+    this.composer.addPass(this._combinePass);
+    this.composer.addPass(new OutputPass());
+
+    this.bloomComposer.setSize(width, height);
+    this.composer.setSize(width, height);
+  }
+
+  /** Re-apply the current theme's bloom settings. */
+  _applyBloom() {
+    const b = this.environment.bloom;
+    if (!b || !this.bloomPass) return;
+    this.bloomPass.strength = b.strength;
+    this.bloomPass.radius = b.radius;
+  }
+
+  /**
+   * Render the frame: glow pass, then the scene with the glow composited on.
+   */
+  _render() {
+    // Swap everything that does not glow to flat black, blur what is left,
+    // then put the materials back and render the scene for real.
+    this.scene.traverse(this._darken);
+    this.bloomComposer.render();
+    // Restore from the object itself rather than looking it up by uuid: a
+    // uuid lookup walks the whole scene graph once per swapped material.
+    for (const [obj, material] of this._savedMaterials) obj.material = material;
+    this._savedMaterials.clear();
+    this.composer.render();
+  }
+
   _buildRenderer() {
     this.renderer = new THREE.WebGLRenderer({
       canvas: this.canvas,
@@ -181,6 +308,8 @@ export class Game {
     // Belt and braces: never let a non-finite aspect reach the camera.
     this.camera.aspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 16 / 9;
     this.camera.updateProjectionMatrix();
+    this.composer?.setSize(width, height);
+    this.bloomComposer?.setSize(width, height);
   }
 
   _bindInput() {
@@ -321,6 +450,7 @@ export class Game {
     this.theme = theme;
     this.environment.setTheme(theme);
     this.structures?.setTheme(theme);
+    this._applyBloom();
     try { localStorage.setItem('dronerun.theme', theme); } catch { /* ignore */ }
   }
 
@@ -518,8 +648,18 @@ export class Game {
       onName: (n) => this.setName(n),
       onHost: (seed) => this.goOnline(makeRoomCode(), { create: true, seed }),
       onJoin: (code) => this.goOnline(code, { create: false }),
+      seedIsExplicit: this._seedIsExplicit,
       onStart: (seed) => {
-        if (seed !== this.seed) this.loadTrack(seed);
+        // Typing a different seed always means "race exactly this".
+        if (seed !== this.seed) {
+          this._seedIsExplicit = true;
+          this.loadTrack(seed);
+        }
+        this.beginFresh();
+      },
+      onStartRandom: () => {
+        this._seedIsExplicit = false;
+        this.loadTrack(randomSeed());
         this.begin();
       },
       onSeed: () => {
@@ -539,6 +679,18 @@ export class Game {
         }
       },
     });
+  }
+
+  /**
+   * Start a solo race, generating a new course unless the seed was chosen
+   * deliberately. Online races never come through here — the room's seed is
+   * shared, so re-rolling it would put players on different tracks.
+   */
+  beginFresh() {
+    if (!this.online && !this._seedIsExplicit) this.loadTrack(randomSeed());
+    // An explicit seed is honoured once; the next start is random again.
+    this._seedIsExplicit = false;
+    this.begin();
   }
 
   begin() {
@@ -797,7 +949,7 @@ export class Game {
     const on = this.boost.active;
     if (on === this._boostVisual) return;
     this._boostVisual = on;
-    this.model.accentMaterial.emissiveIntensity = on ? 1.5 : 0.45;
+    this.model.accentMaterial.emissiveIntensity = on ? 2.8 : SHELL_GLOW;
     if (this.model.trail) this.model.trail.material.opacity = on ? 0.9 : 0.5;
   }
 
@@ -810,7 +962,7 @@ export class Game {
     dt = Math.min(dt, 0.1);
 
     if (!this._paused) this._tick(dt);
-    this.renderer.render(this.scene, this.camera);
+    this._render();
   }
 
   _tick(dt) {
@@ -996,6 +1148,9 @@ export class Game {
     this.gates?.dispose();
     this.structures?.dispose();
     this.model.dispose();
+    this.composer?.dispose();
+    this.bloomComposer?.dispose();
+    this._darkMaterial?.dispose();
     this.renderer.dispose();
   }
 }

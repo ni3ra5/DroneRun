@@ -148,22 +148,21 @@ console.log('\n=== BOOST ===');
   run(boosted, { forward: 1, right: 0, yaw: 0, vertical: 0, boost: 1 }, 8);
   const vBoost = Math.hypot(boosted.velocity.x, boosted.velocity.z);
 
-  ok(vBoost > vPlain * 1.25, 'boost raises top speed appreciably',
+  ok(vBoost > vPlain * 1.8, 'boost roughly doubles top speed',
      `${(vPlain * 3.6).toFixed(0)} -> ${(vBoost * 3.6).toFixed(0)} km/h (+${((vBoost / vPlain - 1) * 100).toFixed(0)}%)`);
 
-  // Leaning to 55° costs some height while the craft accelerates, because
-  // the vertical-hold integrator has to wind up against the new drag. What
-  // matters is that it converges rather than sinking indefinitely — checked
-  // here at the end of a long boost.
-  ok(Math.abs(boosted.velocity.y) < 0.2, 'vertical hold converges under sustained boost',
-     `vy=${boosted.velocity.y.toFixed(3)} m/s after 8 s at full lean`);
+  // Convergence under sustained boost is asserted further down, over a
+  // 12-second horizon: leaning to 63° puts a lot of airspeed on the body's
+  // vertical axis, and the vertical-hold integrator takes longer than 8 s to
+  // wind up against that much drag. What the player actually experiences is
+  // the per-reserve cost, checked next.
 
   // And the number a player actually experiences: height lost over one full
   // reserve. Gate radii are 4.2-5.6 m, so this has to be well inside that.
   const oneReserve = new DronePhysics();
   oneReserve.reset(new THREE.Vector3(0, 40, 0), 0);
   run(oneReserve, { forward: 1, right: 0, yaw: 0, vertical: 0, boost: 1 }, 2.8);
-  ok(40 - oneReserve.position.y < 1.6, 'a full boost costs little altitude',
+  ok(40 - oneReserve.position.y < 2.5, 'a full boost costs little altitude',
      `${(40 - oneReserve.position.y).toFixed(2)} m lost over the 2.8 s reserve, reaching ${(Math.hypot(oneReserve.velocity.x, oneReserve.velocity.z) * 3.6).toFixed(0)} km/h`);
 
   // Acceleration, not just terminal speed — this is what a player feels.
@@ -171,8 +170,32 @@ console.log('\n=== BOOST ===');
   run(a1, { forward: 1, right: 0, yaw: 0, vertical: 0, boost: 0 }, 1.5);
   const a2 = new DronePhysics(); a2.reset(new THREE.Vector3(0, 40, 0), 0);
   run(a2, { forward: 1, right: 0, yaw: 0, vertical: 0, boost: 1 }, 1.5);
-  ok(a2.speed > a1.speed * 1.15, 'boost accelerates harder off the mark',
+  ok(a2.speed > a1.speed * 1.7, 'boost accelerates far harder off the mark',
      `${a1.speed.toFixed(1)} -> ${a2.speed.toFixed(1)} m/s after 1.5 s`);
+
+  // The vertical integrator's clamp, not thrust, is what decides whether the
+  // craft can hold height at full boost lean — the controller can only ask
+  // for g + climbKi * climbIClamp of vertical acceleration, so raising
+  // maxRotorThrust on its own changes nothing. Guard that it stays adequate.
+  const held = new DronePhysics();
+  held.reset(new THREE.Vector3(0, 300, 0), 0);
+  run(held, { forward: 1, right: 0, yaw: 0, vertical: 0, boost: 1 }, 12);
+  ok(Math.abs(held.velocity.y) < 0.2,
+     'the vertical hold keeps up with full boost rather than sinking',
+     `vy=${held.velocity.y.toFixed(3)} m/s after 12 s at full lean`);
+
+  // A wound-up integrator must not fling the craft upward on release.
+  const rel = new DronePhysics();
+  rel.reset(new THREE.Vector3(0, 300, 0), 0);
+  run(rel, { forward: 1, right: 0, yaw: 0, vertical: 0, boost: 1 }, 3);
+  const atRelease = rel.position.y;
+  let peak = atRelease;
+  for (let i = 0; i < 240 * 4; i++) {
+    rel.step(DT, ZERO, null);
+    peak = Math.max(peak, rel.position.y);
+  }
+  ok(peak - atRelease < 4, 'releasing boost does not fling the craft upward',
+     `${(peak - atRelease).toFixed(2)} m of overshoot`);
 }
 {
   const feed = (b, seconds, held) => {

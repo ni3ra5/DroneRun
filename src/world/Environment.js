@@ -26,6 +26,9 @@ export const THEMES = {
     gridCoarse: { color: 0x2f5f80, opacity: 0.28 },
     stars: true,
     exposure: 1.0,
+    // Only the drone shells reach the bloom pass, so there is no threshold
+    // to tune — the isolation is by layer. See Game._buildComposer.
+    bloom: { strength: 1.15, radius: 0.55 },
   },
   day: {
     sky: { top: 0x2f7fd0, horizon: 0xbcd7ef, bottom: 0x9fb8cc },
@@ -42,6 +45,8 @@ export const THEMES = {
     gridCoarse: { color: 0x49596a, opacity: 0.3 },
     stars: false,
     exposure: 0.95,
+    // Daylight needs a firmer glow to read against a bright sky.
+    bloom: { strength: 1.35, radius: 0.5 },
   },
 };
 
@@ -220,6 +225,7 @@ export class Environment {
 
     this.stars.visible = t.stars;
     if (this.renderer) this.renderer.toneMappingExposure = t.exposure;
+    this.bloom = t.bloom;
   }
 
   /** Keep the shadow frustum centred on the action. */

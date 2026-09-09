@@ -222,8 +222,10 @@ export class Gates {
       g.ringMat.dispose();
       g.filmMat.dispose();
       g.coneMat.dispose();
-      g.label.material.map.dispose();
-      g.label.material.dispose();
+      // Guarded: the render path temporarily swaps materials for the bloom
+      // pass, so a label may not be holding its own sprite material here.
+      g.label.material?.map?.dispose();
+      g.label.material?.dispose();
     }
     this.gates.length = 0;
     for (const line of [this.fullLine, this.legLine]) {
