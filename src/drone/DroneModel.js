@@ -1,12 +1,33 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 
 /**
- * Visual airframe. Every player flies the identical model — only the accent
- * colour changes — so nobody gets an aerodynamic or readability advantage.
+ * Visual airframe, modelled on a folding camera drone: a tapered two-tone
+ * fuselage, four booms angled out to the motors, tall rear landing legs and a
+ * gimbal camera slung under the nose.
+ *
+ * Every player flies the identical shape — only the colour of the top shell
+ * changes — so nobody gets a readability advantage. The shell is the coloured
+ * part deliberately: the chase camera looks down at the drone from behind, so
+ * the top surface is what you actually see, and it is what makes eight racers
+ * distinguishable at distance.
+ *
+ * ── Draw calls ─────────────────────────────────────────────────────────────
+ *
+ * A detailed airframe built as one mesh per part would be ruinous with a full
+ * grid: the previous flat X-frame was already 14 meshes, and eight of those
+ * accounted for most of a 350-call frame. So parts are merged by material at
+ * module load into four shared geometries, leaving 8 meshes per drone:
+ *
+ *   shell · body · dark trim · 4 spinning props · 1 merged blur disc
+ *
+ * The geometry is identical for every drone, so it is built once and shared;
+ * only the materials are per-instance.
  */
 
 const SQRT1_2 = Math.SQRT1_2;
-const ARM = 0.26;
+const ARM = 0.26;                    // must match DronePhysics' rotor arm
+const HUB = SQRT1_2 * ARM;           // rotor offset on each axis, ≈0.184
 
 export const PLAYER_COLORS = [
   { name: 'Cyan',    hex: 0x35e6d0 },
@@ -19,30 +40,209 @@ export const PLAYER_COLORS = [
   { name: 'Mint',    hex: 0x5cffb1 },
 ];
 
-// Shared geometry/material — one allocation regardless of player count.
-const geo = {
-  body: new THREE.BoxGeometry(0.3, 0.085, 0.4),
-  canopy: new THREE.SphereGeometry(0.11, 16, 12, 0, Math.PI * 2, 0, Math.PI * 0.55),
-  arm: new THREE.BoxGeometry(0.042, 0.028, ARM * 1.02),
-  hub: new THREE.CylinderGeometry(0.037, 0.045, 0.05, 12),
-  blade: new THREE.BoxGeometry(0.235, 0.006, 0.03),
-  disc: new THREE.CircleGeometry(0.125, 20),
-  skid: new THREE.BoxGeometry(0.022, 0.075, 0.022),
-  led: new THREE.SphereGeometry(0.021, 8, 6),
+// ── geometry helpers ───────────────────────────────────────────────────────
+
+/** Position/rotate/scale a geometry, returning a transformed clone. */
+function placed(geo, { pos = [0, 0, 0], quat = null, euler = null, scale = null } = {}) {
+  const g = geo.clone();
+  const m = new THREE.Matrix4();
+  const q = quat ?? (euler
+    ? new THREE.Quaternion().setFromEuler(new THREE.Euler(...euler))
+    : new THREE.Quaternion());
+  m.compose(
+    new THREE.Vector3(...pos), q,
+    new THREE.Vector3(...(scale ?? [1, 1, 1])),
+  );
+  g.applyMatrix4(m);
+  return g;
+}
+
+/**
+ * A box narrowed toward its front face, giving the fuselage its wedge.
+ * BoxGeometry keeps separate vertices per face, so moving the corners in and
+ * recomputing normals leaves the surface faceted rather than smoothed.
+ */
+function taperedBox(w, h, d, frontScaleX, frontScaleY) {
+  const g = new THREE.BoxGeometry(w, h, d);
+  const p = g.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    const z = p.getZ(i);
+    const t = (z + d / 2) / d;                 // 0 at the nose, 1 at the tail
+    const sx = THREE.MathUtils.lerp(frontScaleX, 1, t);
+    const sy = THREE.MathUtils.lerp(frontScaleY, 1, t);
+    p.setX(i, p.getX(i) * sx);
+    p.setY(i, p.getY(i) * sy);
+  }
+  g.computeVertexNormals();
+  return g;
+}
+
+/** A boom spanning two points, e.g. an arm or a landing leg. */
+function boom(from, to, width, height) {
+  const a = new THREE.Vector3(...from);
+  const b = new THREE.Vector3(...to);
+  const dir = new THREE.Vector3().subVectors(b, a);
+  const len = dir.length();
+  const g = new THREE.BoxGeometry(width, height, len);
+  const quat = new THREE.Quaternion().setFromUnitVectors(
+    new THREE.Vector3(0, 0, 1), dir.clone().normalize(),
+  );
+  return placed(g, { pos: a.clone().addScaledVector(dir, 0.5).toArray(), quat });
+}
+
+/** Rotor positions in the X configuration the physics mixer assumes. */
+const ROTOR_AT = [
+  [+HUB, -HUB],   // 0 front-right
+  [+HUB, +HUB],   // 1 rear-right
+  [-HUB, +HUB],   // 2 rear-left
+  [-HUB, -HUB],   // 3 front-left
+];
+
+// ── shared geometry, built once ────────────────────────────────────────────
+
+function buildShell() {
+  const parts = [
+    // Upper shell: broad and low, inset from the lower body so the fuselage
+    // reads as two-tone rather than as a coloured brick sitting on a box.
+    placed(taperedBox(0.176, 0.044, 0.315, 0.5, 0.45), { pos: [0, 0.056, -0.012] }),
+    // Battery pack proud of the tail.
+    placed(taperedBox(0.13, 0.03, 0.115, 0.9, 0.8), { pos: [0, 0.082, 0.108] }),
+  ];
+  return mergeGeometries(parts, false);
+}
+
+function buildBody() {
+  // Proportions are taken from the reference airframe rather than invented:
+  // its body is roughly two thirds of its motor-to-motor diagonal, and about
+  // 0.38 of it wide. The physics fixes that diagonal at 2 x ARM = 0.52 m, so
+  // the fuselage has to be ~0.36 x 0.20 to sit right. Built smaller, the arms
+  // stop reading as stubby booms and start looking like spider legs.
+  const parts = [
+    placed(taperedBox(0.20, 0.078, 0.36, 0.52, 0.62), { pos: [0, 0.012, 0] }),
+    // A lip along the nose, which is where the reference has its sensor bar.
+    placed(taperedBox(0.11, 0.016, 0.05, 0.75, 0.7), { pos: [0, 0.0, -0.19] }),
+  ];
+
+  for (let i = 0; i < 4; i++) {
+    const [x, z] = ROTOR_AT[i];
+    const front = z < 0;
+    // Booms leave the fuselage flanks close to the motors, so they are short
+    // and flat like folding arms rather than long radiating spokes.
+    const rootX = Math.sign(x) * 0.088;
+    const rootZ = front ? -0.125 : 0.125;
+    parts.push(boom([rootX, 0.014, rootZ], [x, 0.008, z], 0.052, 0.032));
+
+    // Motor housing; the bell on top belongs to the dark trim.
+    parts.push(placed(new THREE.CylinderGeometry(0.029, 0.033, 0.036, 14),
+      { pos: [x, 0.026, z] }));
+
+    if (front) {
+      // Short front feet.
+      parts.push(boom([x, 0.004, z], [x * 1.02, -0.062, z * 1.01], 0.026, 0.026));
+      parts.push(placed(new THREE.BoxGeometry(0.042, 0.011, 0.042),
+        { pos: [x * 1.03, -0.066, z * 1.02] }));
+    } else {
+      // Tall rear legs, which is what the real airframe stands on.
+      parts.push(boom([x, 0.004, z], [x * 1.07, -0.118, z * 1.05], 0.03, 0.03));
+      parts.push(placed(new THREE.BoxGeometry(0.05, 0.012, 0.058),
+        { pos: [x * 1.09, -0.123, z * 1.06] }));
+    }
+  }
+  return mergeGeometries(parts, false);
+}
+
+function buildDark() {
+  const parts = [
+    // Gimbal yoke and camera body slung under the nose.
+    placed(new THREE.BoxGeometry(0.042, 0.04, 0.03), { pos: [0, -0.042, -0.135] }),
+    placed(new THREE.BoxGeometry(0.07, 0.058, 0.062), { pos: [0, -0.066, -0.168] }),
+    // Lens, facing forward along -Z.
+    placed(new THREE.CylinderGeometry(0.022, 0.025, 0.02, 16),
+      { pos: [0, -0.066, -0.202], euler: [Math.PI / 2, 0, 0] }),
+    // Sensor bar on the nose lip.
+    placed(new THREE.BoxGeometry(0.072, 0.011, 0.008), { pos: [0, 0.004, -0.209] }),
+    // Vent slots along the tail.
+    placed(new THREE.BoxGeometry(0.09, 0.014, 0.008), { pos: [0, 0.03, 0.178] }),
+  ];
+  for (let i = 0; i < 4; i++) {
+    const [x, z] = ROTOR_AT[i];
+    parts.push(placed(new THREE.CylinderGeometry(0.032, 0.03, 0.019, 14),
+      { pos: [x, 0.05, z] }));
+  }
+  return mergeGeometries(parts, false);
+}
+
+/**
+ * One propeller: two broad blades with lighter tips.
+ *
+ * Tip colour is baked into a vertex-colour attribute so the whole prop stays
+ * a single material. Note that `vertexColors: true` requires the geometry to
+ * actually carry a `color` attribute -- without one, WebGL supplies zero for
+ * the missing attribute and the mesh renders black.
+ */
+function buildProp() {
+  const blade = () => {
+    const g = new THREE.BoxGeometry(0.112, 0.006, 0.042);
+    g.translate(0.066, 0, 0);
+    return g;
+  };
+  const tip = () => {
+    const g = new THREE.BoxGeometry(0.024, 0.006, 0.036);
+    g.translate(0.133, 0, 0);
+    return g;
+  };
+  const parts = [
+    placed(new THREE.CylinderGeometry(0.015, 0.018, 0.014, 12), { pos: [0, 0, 0] }),
+    blade(), tip(),
+    placed(blade(), { euler: [0, Math.PI, 0] }),
+    placed(tip(), { euler: [0, Math.PI, 0] }),
+  ];
+  const tinted = [0x24282e, 0x24282e, 0xff7a3d, 0x24282e, 0xff7a3d];
+
+  parts.forEach((g, i) => {
+    const c = new THREE.Color(tinted[i]);
+    const count = g.attributes.position.count;
+    const colors = new Float32Array(count * 3);
+    for (let v = 0; v < count; v++) {
+      colors[v * 3] = c.r;
+      colors[v * 3 + 1] = c.g;
+      colors[v * 3 + 2] = c.b;
+    }
+    g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  });
+  return mergeGeometries(parts, false);
+}
+
+/** All four blur discs in one geometry: their opacity animates together. */
+function buildDiscs() {
+  const parts = ROTOR_AT.map(([x, z]) => placed(
+    new THREE.CircleGeometry(0.15, 22),
+    { pos: [x, 0.066, z], euler: [-Math.PI / 2, 0, 0] },
+  ));
+  return mergeGeometries(parts, false);
+}
+
+const GEO = {
+  shell: buildShell(),
+  body: buildBody(),
+  dark: buildDark(),
+  prop: buildProp(),
+  discs: buildDiscs(),
 };
 
-const mat = {
-  carbon: new THREE.MeshStandardMaterial({ color: 0x1a1f28, roughness: 0.55, metalness: 0.6 }),
-  dark: new THREE.MeshStandardMaterial({ color: 0x0d1016, roughness: 0.7, metalness: 0.3 }),
-  blade: new THREE.MeshStandardMaterial({
-    color: 0x2a3038, roughness: 0.4, metalness: 0.5,
-    transparent: true, opacity: 0.82, side: THREE.DoubleSide,
+// Shared materials for the parts that never change colour.
+const MAT = {
+  body: new THREE.MeshStandardMaterial({ color: 0xd2d6dc, roughness: 0.52, metalness: 0.18 }),
+  dark: new THREE.MeshStandardMaterial({ color: 0x1d2025, roughness: 0.45, metalness: 0.5 }),
+  prop: new THREE.MeshStandardMaterial({
+    vertexColors: true, roughness: 0.4, metalness: 0.35,
+    transparent: true, opacity: 0.9, side: THREE.DoubleSide,
   }),
 };
 
 export class DroneModel {
   /**
-   * @param {number} colorHex accent colour
+   * @param {number} colorHex the player's identifying colour
    * @param {{trail?: boolean}} opts
    */
   constructor(colorHex = PLAYER_COLORS[0].hex, opts = {}) {
@@ -51,70 +251,36 @@ export class DroneModel {
     this.rotors = [];
     this._spin = [0, 0, 0, 0];
 
-    const accent = new THREE.MeshStandardMaterial({
-      color: colorHex, roughness: 0.3, metalness: 0.2,
+    // The one per-drone material: the top shell carries the player's colour.
+    this.accentMaterial = new THREE.MeshStandardMaterial({
+      color: colorHex, roughness: 0.34, metalness: 0.2,
       emissive: colorHex, emissiveIntensity: 0.45,
     });
-    const glow = new THREE.MeshBasicMaterial({ color: colorHex });
-    this.accentMaterial = accent;
 
-    const body = new THREE.Mesh(geo.body, mat.carbon);
+    const shell = new THREE.Mesh(GEO.shell, this.accentMaterial);
+    const body = new THREE.Mesh(GEO.body, MAT.body);
+    const dark = new THREE.Mesh(GEO.dark, MAT.dark);
+    shell.castShadow = true;
     body.castShadow = true;
-    this.group.add(body);
+    this.group.add(shell, body, dark);
 
-    const canopy = new THREE.Mesh(geo.canopy, accent);
-    canopy.position.set(0, 0.04, -0.06);
-    canopy.castShadow = true;
-    this.group.add(canopy);
-
-    // Four arms in an X, each carrying a hub, a two-blade prop and an LED.
     for (let i = 0; i < 4; i++) {
-      const sx = i === 0 || i === 1 ? 1 : -1;
-      const sz = i === 1 || i === 2 ? 1 : -1;
-      const px = sx * SQRT1_2 * ARM;
-      const pz = sz * SQRT1_2 * ARM;
-
-      const arm = new THREE.Mesh(geo.arm, mat.carbon);
-      arm.position.set(px / 2, 0, pz / 2);
-      arm.lookAt(px, 0, pz);
-      arm.castShadow = true;
-      this.group.add(arm);
-
-      const hub = new THREE.Mesh(geo.hub, mat.dark);
-      hub.position.set(px, 0.028, pz);
-      hub.castShadow = true;
-      this.group.add(hub);
-
-      // Prop: two blades plus a translucent disc that fades in with RPM to
-      // read as motion blur instead of a strobing polygon.
-      const prop = new THREE.Group();
-      prop.position.set(px, 0.058, pz);
-      const b1 = new THREE.Mesh(geo.blade, mat.blade);
-      const b2 = new THREE.Mesh(geo.blade, mat.blade);
-      b2.rotation.y = Math.PI / 2;
-      const disc = new THREE.Mesh(geo.disc, new THREE.MeshBasicMaterial({
-        color: 0x8fa6c0, transparent: true, opacity: 0, side: THREE.DoubleSide,
-        depthWrite: false,
-      }));
-      disc.rotation.x = -Math.PI / 2;
-      prop.add(b1, b2, disc);
-      prop.userData.disc = disc;
+      const [x, z] = ROTOR_AT[i];
+      const prop = new THREE.Mesh(GEO.prop, MAT.prop);
+      prop.position.set(x, 0.066, z);
+      // Alternating spin, matching the physics mixer's rotor directions.
       prop.userData.dir = i === 0 || i === 2 ? 1 : -1;
       this.group.add(prop);
       this.rotors.push(prop);
-
-      // Rear LEDs in the player colour, front ones white, so heading is
-      // readable at a glance from any angle.
-      const led = new THREE.Mesh(geo.led, sz > 0 ? glow : new THREE.MeshBasicMaterial({ color: 0xf2f7ff }));
-      led.position.set(px, -0.03, pz);
-      this.group.add(led);
-
-      if (i < 2) {
-        const skid = new THREE.Mesh(geo.skid, mat.dark);
-        skid.position.set(sx * 0.1, -0.06, 0);
-        this.group.add(skid);
-      }
     }
+
+    // Motion blur across all four rotors, driven by mean thrust.
+    this._discMaterial = new THREE.MeshBasicMaterial({
+      color: 0x9fb3c8, transparent: true, opacity: 0,
+      side: THREE.DoubleSide, depthWrite: false,
+    });
+    this._discs = new THREE.Mesh(GEO.discs, this._discMaterial);
+    this.group.add(this._discs);
 
     if (opts.trail !== false) this._buildTrail();
   }
@@ -165,14 +331,16 @@ export class DroneModel {
     this.group.quaternion.copy(body.quaternion);
 
     const maxThrust = body.t.maxRotorThrust;
+    let mean = 0;
     for (let i = 0; i < 4; i++) {
       const prop = this.rotors[i];
       // RPM scales with the square root of thrust, as with a real rotor.
       const ratio = Math.sqrt(Math.max(0, body.rotorThrust[i]) / maxThrust);
+      mean += ratio;
       this._spin[i] += prop.userData.dir * ratio * 165 * dt;
       prop.rotation.y = this._spin[i];
-      prop.userData.disc.material.opacity = Math.min(0.3, ratio * 0.34);
     }
+    this._discMaterial.opacity = Math.min(0.28, (mean / 4) * 0.32);
 
     if (this.trail) this._pushTrail(body.position);
   }
@@ -211,6 +379,8 @@ export class DroneModel {
   }
 
   dispose() {
+    // GEO and MAT are module-scoped and shared across every drone, so they
+    // are deliberately not disposed here. Only per-drone material is.
     this.group.removeFromParent();
     if (this.trail) {
       this.trail.removeFromParent();
@@ -218,5 +388,6 @@ export class DroneModel {
       this.trail.material.dispose();
     }
     this.accentMaterial.dispose();
+    this._discMaterial.dispose();
   }
 }
