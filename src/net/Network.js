@@ -85,8 +85,31 @@ export class RemoteFleet {
       adapter.on('join', (p) => this.add(p)),
       adapter.on('leave', (p) => this.remove(p.id)),
       adapter.on('state', (p) => this.applyState(p)),
+      // The roster is authoritative, so reconcile against it. Join and leave
+      // alone are not enough: a state packet in flight when someone departs
+      // would otherwise resurrect them as a peer nothing ever removes again.
+      adapter.on('roster', ({ players, selfId }) => this.syncRoster(players, selfId)),
     ];
     return this;
+  }
+
+  /**
+   * Make the fleet match the relay's roster exactly: add anyone missing,
+   * drop anyone no longer listed.
+   *
+   * @param {Array<{id: string, name: string, color: number}>} players
+   * @param {?string} selfId excluded — we render our own drone ourselves
+   */
+  syncRoster(players, selfId) {
+    const present = new Set();
+    for (const p of players) {
+      if (p.id === selfId) continue;
+      present.add(p.id);
+      this.add(p);
+    }
+    for (const id of [...this.peers.keys()]) {
+      if (!present.has(id)) this.remove(id);
+    }
   }
 
   detach() {
@@ -116,7 +139,12 @@ export class RemoteFleet {
   }
 
   applyState(packet) {
-    const peer = this.peers.get(packet.id) ?? this.add(packet);
+    // Deliberately does not create unknown peers. Peers come from the
+    // roster, which is authoritative; creating one here means a packet that
+    // was already in flight when its sender left brings them back as a
+    // ghost, and nothing will ever remove them.
+    const peer = this.peers.get(packet.id);
+    if (!peer) return;
     peer.snapshots.push({
       t: this._clock,
       p: new THREE.Vector3().fromArray(packet.p),

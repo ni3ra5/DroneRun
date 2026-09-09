@@ -397,6 +397,12 @@ export class Game {
 
     adapter.on('roster', ({ players, selfId, isHost }) => {
       Object.assign(this.lobby, { players, selfId, isHost });
+      // Drop progress for anyone no longer in the room, so a departed racer
+      // cannot linger on the scoreboard.
+      const present = new Set(players.map((p) => p.id));
+      for (const id of [...this.peerProgress.keys()]) {
+        if (!present.has(id)) this.peerProgress.delete(id);
+      }
       refresh();
     });
     adapter.on('status', ({ state }) => {

@@ -350,6 +350,44 @@ console.log('\n=== INPUT ===');
   input.dispose();
 }
 
+console.log('\n=== REMOTE FLEET ===');
+{
+  const { RemoteFleet, NetworkAdapter } = await import('../src/net/Network.js');
+  const scene = { add() {}, remove() {} };
+  const fleet = new RemoteFleet(scene);
+  const adapter = new NetworkAdapter();
+  fleet.attach(adapter);
+
+  const roster = (ids) => adapter.emit('roster', {
+    players: ids.map((id) => ({ id, name: id, color: 0x35e6d0 })),
+    selfId: 'me',
+  });
+
+  roster(['me', 'a', 'b']);
+  ok(fleet.count === 2 && !fleet.peers.has('me'),
+     'the roster populates the fleet and excludes ourselves', `${fleet.count} peers`);
+
+  roster(['me', 'a']);
+  ok(fleet.count === 1 && fleet.peers.has('a') && !fleet.peers.has('b'),
+     'a racer dropped from the roster is removed from the fleet');
+
+  // The bug this guards: a state packet already in flight when its sender
+  // leaves must not resurrect them as a peer nothing ever removes again.
+  adapter.emit('state', { id: 'b', name: 'b', color: 0, p: [1, 2, 3], q: [0, 0, 0, 1] });
+  ok(fleet.count === 1 && !fleet.peers.has('b'),
+     'a late state packet cannot resurrect a departed racer');
+
+  // A live peer still moves.
+  adapter.emit('state', { id: 'a', p: [4, 5, 6], q: [0, 0, 0, 1] });
+  ok(fleet.peers.get('a').snapshots.length === 1, 'state from a live peer is still applied');
+
+  // An explicit leave works as before.
+  adapter.emit('leave', { id: 'a' });
+  ok(fleet.count === 0, 'an explicit leave removes the peer');
+
+  fleet.dispose();
+}
+
 console.log('\n=== TRAIL ===');
 {
   // The trail is a ring buffer rendered as a line strip. Getting the
