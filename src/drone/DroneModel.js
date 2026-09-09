@@ -1,6 +1,5 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { BLOOM_LAYER } from '../config.js';
 
 /**
  * Visual airframe, modelled on a folding camera drone: a tapered two-tone
@@ -252,12 +251,12 @@ export class DroneModel {
     this.rotors = [];
     this._spin = [0, 0, 0, 0];
 
-    // The one per-drone material: the top shell carries the player's colour
-    // and glows. Metalness is kept low — a metallic surface takes its colour
-    // from reflections, which would mute the emissive underneath it.
+    // The one per-drone material: the top shell carries the player's colour.
+    // Metalness is kept low — a metallic surface takes its colour from
+    // reflections, which would mute the accent underneath it.
     this.accentMaterial = new THREE.MeshStandardMaterial({
       color: colorHex, roughness: 0.4, metalness: 0.05,
-      emissive: colorHex, emissiveIntensity: 0.9,
+      emissive: colorHex, emissiveIntensity: 0.45,
     });
 
     const shell = new THREE.Mesh(GEO.shell, this.accentMaterial);
@@ -265,10 +264,6 @@ export class DroneModel {
     const dark = new THREE.Mesh(GEO.dark, MAT.dark);
     shell.castShadow = true;
     body.castShadow = true;
-    // The shell is the only thing in the game that glows, so it is the only
-    // thing placed on the bloom layer. `enable` rather than `set`, so it
-    // still renders in the ordinary pass as well.
-    shell.layers.enable(BLOOM_LAYER);
     this.shell = shell;
     this.group.add(shell, body, dark);
 

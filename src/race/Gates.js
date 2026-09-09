@@ -222,8 +222,8 @@ export class Gates {
       g.ringMat.dispose();
       g.filmMat.dispose();
       g.coneMat.dispose();
-      // Guarded: the render path temporarily swaps materials for the bloom
-      // pass, so a label may not be holding its own sprite material here.
+      // Guarded rather than assumed: a dispose path should not throw if
+      // something upstream has swapped a material out.
       g.label.material?.map?.dispose();
       g.label.material?.dispose();
     }
