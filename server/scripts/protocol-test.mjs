@@ -53,17 +53,24 @@ console.log(`\n=== relay protocol (room ${room}) ===`);
 // ── two players join ──────────────────────────────────────────────────
 const a = new Peer(room, 'Ana', 0x35e6d0);
 await a.ready;
-a.send({ t: 'hello', name: 'Ana', color: 0x35e6d0, seed: 'cobalt-drift-417' });
+a.send({ t: 'hello', name: 'Ana', color: 0x35e6d0, seed: 'cobalt-drift-417', theme: 'day', gates: 22 });
 const welcomeA = await a.expect('welcome');
 ok(welcomeA.seed === 'cobalt-drift-417', 'first player sets the course seed', welcomeA.seed);
+ok(welcomeA.theme === 'day' && welcomeA.gates === 22,
+   'first player also sets the lighting and the course length',
+   `${welcomeA.theme}, ${welcomeA.gates} gates`);
 ok(welcomeA.host === welcomeA.you, 'first player becomes host');
 ok(welcomeA.phase === 'lobby', 'room starts in the lobby');
 
 const b = new Peer(room, 'Bo', 0xff4d7e);
 await b.ready;
-b.send({ t: 'hello', name: 'Bo', color: 0xff4d7e });
+// Deliberately asks for the opposite of everything the room already agreed.
+b.send({ t: 'hello', name: 'Bo', color: 0xff4d7e, theme: 'night', gates: 8 });
 const welcomeB = await b.expect('welcome');
 ok(welcomeB.seed === 'cobalt-drift-417', 'a later joiner inherits the seed', welcomeB.seed);
+ok(welcomeB.theme === 'day' && welcomeB.gates === 22,
+   'a later joiner inherits the room settings rather than imposing its own',
+   `${welcomeB.theme}, ${welcomeB.gates} gates`);
 ok(welcomeB.host === welcomeA.you, 'the host does not change when someone joins');
 ok(welcomeB.players.length === 2, 'the newcomer sees everyone already present',
    `${welcomeB.players.length} players`);
@@ -89,6 +96,35 @@ a.send({ t: 'seed', seed: 'nova-ember-763' });
 const seedMsg = await b.expect('seed');
 ok(seedMsg.seed === 'nova-ember-763', 'the host can change the course', seedMsg.seed);
 
+// ── lighting and course length are the host's too ─────────────────────
+b.send({ t: 'theme', theme: 'night' });
+b.send({ t: 'gates', gates: 12 });
+await settle();
+ok(!a.has('theme'), 'a non-host cannot change the lighting');
+ok(!a.has('gates'), 'a non-host cannot change the course length');
+
+a.send({ t: 'theme', theme: 'night' });
+const themeMsg = await b.expect('theme');
+ok(themeMsg.theme === 'night', 'the host can change the lighting', themeMsg.theme);
+// The host has to be told as well, so every client applies the change by the
+// same path and no client can end up out of step with the room.
+const themeEcho = await a.expect('theme');
+ok(themeEcho.theme === 'night', 'the host is echoed its own lighting change');
+
+a.send({ t: 'gates', gates: 12 });
+const gatesMsg = await b.expect('gates');
+ok(gatesMsg.gates === 12, 'the host can change the course length', `${gatesMsg.gates} gates`);
+await a.expect('gates');
+
+a.send({ t: 'theme', theme: 'chartreuse' });
+a.send({ t: 'gates', gates: 900 });
+await settle();
+ok(!b.has('theme'), 'a lighting value outside the two themes is rejected');
+const clamped = b.has('gates') ? (await b.expect('gates')).gates : null;
+ok(clamped === 28, 'an out-of-range course length is clamped, not rejected outright',
+   `900 -> ${clamped}`);
+a.inbox.length = 0;
+
 b.send({ t: 'start' });
 await settle();
 ok(!a.has('start'), 'a non-host cannot start the race');
@@ -98,6 +134,15 @@ const startA = await a.expect('start');
 const startB = await b.expect('start');
 ok(startA.countdownMs === startB.countdownMs && startA.countdownMs > 0,
    'the host starts the race for everyone', `${startA.countdownMs} ms countdown`);
+
+// ── settings freeze once the race is under way ────────────────────────
+b.inbox.length = 0;
+a.send({ t: 'theme', theme: 'day' });
+a.send({ t: 'gates', gates: 8 });
+a.send({ t: 'seed', seed: 'mid-race-swap' });
+await settle();
+ok(!b.has('theme') && !b.has('gates') && !b.has('seed'),
+   'the host cannot change the course, its length or the lighting mid-race');
 
 // ── state relay ───────────────────────────────────────────────────────
 a.inbox.length = 0;

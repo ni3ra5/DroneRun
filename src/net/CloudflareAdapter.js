@@ -10,8 +10,8 @@ import { PLAYER_COLORS } from '../drone/DroneModel.js';
  * arrives.
  *
  * Beyond the three events RemoteFleet consumes ('join', 'leave', 'state') it
- * also emits the lobby's events: 'roster', 'seed', 'start', 'lobby', 'full',
- * 'status' and 'event'.
+ * also emits the lobby's events: 'roster', 'seed', 'theme', 'gates', 'color',
+ * 'start', 'lobby', 'full', 'status' and 'event'.
  *
  * The relay assigns each player a palette slot so no two drones in a room
  * share a colour. It sends the slot index, not a colour value — the palette
@@ -63,13 +63,17 @@ export class CloudflareAdapter extends NetworkAdapter {
   /**
    * @param {string} room room code
    * @param {{id: string, name: string, color: number}} identity
-   * @param {{seed?: string}} opts seed proposed if this player creates the room
+   * @param {{seed?: string, theme?: string, gates?: number}} opts settings
+   *        proposed if this player is the one who opens the room; ignored by
+   *        the relay for anyone joining an existing one
    * @returns {Promise<object>} the relay's welcome payload
    */
   connect(room, identity, opts = {}) {
     this.room = String(room).toUpperCase();
     this.identity = identity;
     this._proposedSeed = opts.seed ?? null;
+    this._proposedTheme = opts.theme ?? null;
+    this._proposedGates = opts.gates ?? null;
     this._closing = false;
 
     return new Promise((resolve, reject) => {
@@ -99,6 +103,8 @@ export class CloudflareAdapter extends NetworkAdapter {
         t: 'hello',
         name: this.identity.name,
         seed: this._proposedSeed ?? undefined,
+        theme: this._proposedTheme ?? undefined,
+        gates: this._proposedGates ?? undefined,
       });
     });
 
@@ -148,6 +154,8 @@ export class CloudflareAdapter extends NetworkAdapter {
         this.selfId = msg.you;
         this.colorIndex = msg.yourColorIndex ?? 0;
         this.seed = msg.seed;
+        this.theme = msg.theme ?? null;
+        this.gates = msg.gates ?? null;
         this.phase = msg.phase;
         this.players = this._withColors(msg.players ?? []);
         this.emit('status', { state: 'connected' });
@@ -188,6 +196,19 @@ export class CloudflareAdapter extends NetworkAdapter {
       case 'seed':
         this.seed = msg.seed;
         this.emit('seed', { seed: msg.seed });
+        break;
+
+      // Lighting and course length are the host's to set for the room. The
+      // relay echoes them to the host as well, so every client applies the
+      // change through this one path.
+      case 'theme':
+        this.theme = msg.theme;
+        this.emit('theme', { theme: msg.theme });
+        break;
+
+      case 'gates':
+        this.gates = msg.gates;
+        this.emit('gates', { gates: msg.gates });
         break;
 
       case 'start':
@@ -236,6 +257,8 @@ export class CloudflareAdapter extends NetworkAdapter {
 
   setReady(ready) { this._send({ t: 'ready', ready: !!ready }); }
   setSeed(seed) { this._send({ t: 'seed', seed }); }
+  setTheme(theme) { this._send({ t: 'theme', theme }); }
+  setGates(gates) { this._send({ t: 'gates', gates }); }
   startRace() { this._send({ t: 'start' }); }
   returnToLobby() { this._send({ t: 'lobby' }); }
 }

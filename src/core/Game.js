@@ -2,6 +2,7 @@ import * as THREE from 'three';
 
 import { Input } from './Input.js';
 import { CameraRig } from './CameraRig.js';
+import { PeerView } from './Spectator.js';
 import { randomSeed, randomPilotName } from './rng.js';
 import { readSeed, writeSeed, readRoom, writeRoom, inviteUrl } from './link.js';
 
@@ -11,13 +12,16 @@ import { Boost } from '../drone/Boost.js';
 import { BoostEffect } from '../drone/BoostEffect.js';
 import { Music } from './Music.js';
 
-import { generateTrack } from '../world/TrackGenerator.js';
+import {
+  generateTrack, clampGateCount, DEFAULT_GATES, GATE_CHOICES,
+} from '../world/TrackGenerator.js';
 import { CollisionWorld } from '../world/CollisionWorld.js';
 import { Structures } from '../world/Structures.js';
 import { Environment, THEMES } from '../world/Environment.js';
 
 import { Race, RaceState } from '../race/Race.js';
 import { Bot, botColors } from '../race/Bot.js';
+import { gridPosition } from '../race/Grid.js';
 import { computeStandings } from '../race/Standings.js';
 import { Pickups } from '../race/Pickups.js';
 import { Projectiles } from '../race/Projectiles.js';
@@ -44,7 +48,10 @@ const SOFT_BOUND = 520;   // metres from origin: warn
 const HARD_BOUND = 820;   // metres from origin: return to last gate
 
 export class Game {
-  constructor({ canvas, overlay, seed, theme = 'night', botCount = 0, name = null }) {
+  constructor({
+    canvas, overlay, seed, theme = 'night', botCount = 0, name = null,
+    gateCount = DEFAULT_GATES, mode = 'solo',
+  }) {
     this.canvas = canvas;
     this.seed = seed || randomSeed();
     /**
@@ -54,6 +61,23 @@ export class Game {
      */
     this.colorIndex = 0;
     this.theme = THEMES[theme] ? theme : 'night';
+    this.gateCount = clampGateCount(gateCount);
+    /**
+     * Solo or online, asked first on the start screen because it decides
+     * which of the other settings are this player's to make at all.
+     */
+    this.mode = mode === 'online' && relayConfigured() ? 'online' : 'solo';
+    /**
+     * This player's own settings, kept aside from the live ones.
+     *
+     * Online, the host's lighting and course length are imposed on the whole
+     * room. Those are applied to `theme`/`gateCount` directly, so remembering
+     * the player's own choices separately is what lets them come back on
+     * leaving the room instead of being quietly overwritten by whoever
+     * happened to be hosting.
+     */
+    this._preferredTheme = this.theme;
+    this._preferredGates = this.gateCount;
     /**
      * Whether the current seed was deliberately chosen — from a link, or
      * typed into the seed field — as opposed to generated for us.
@@ -122,6 +146,13 @@ export class Game {
     this._boundWarned = false;
     this._paused = false;
     this._boardAccum = 0;
+    /**
+     * Spectating after the finish: an index into `_spectateTargets()`, or
+     * null for your own drone. Cleared on every reset, so a new race always
+     * starts behind your own craft.
+     */
+    this._spectating = null;
+    this._peerView = null;
 
     this._bindInput();
     this.loadTrack(this.seed);
@@ -213,8 +244,14 @@ export class Game {
   _bindInput() {
     this.input.on('usePowerUp', () => this.usePowerUp());
     this.input.on('respawn', () => this.respawn());
-    this.input.on('pause', () => this.togglePause());
+    this.input.on('pause', () => {
+      // Both of these taps are dead once the race is over, so the spectate
+      // view can borrow them without touching the flight keymap.
+      if (this._spectating != null) { this.stopSpectating(); return; }
+      this.togglePause();
+    });
     this.input.on('confirm', () => {
+      if (this._spectating != null) { this.spectateStep(1); return; }
       if (this.race?.state === RaceState.IDLE) this.begin();
     });
 
@@ -224,6 +261,10 @@ export class Game {
       const muted = this.music.toggleMute();
       this.hud.setMuted(muted);
     };
+
+    // The spectate bar's own controls, for anyone not reaching for Esc.
+    this.hud.onSpectateStep = (delta) => this.spectateStep(delta);
+    this.hud.onSpectateExit = () => this.stopSpectating();
   }
 
   // ── track lifecycle ────────────────────────────────────────────────────
@@ -234,7 +275,7 @@ export class Game {
     this.gates?.dispose();
     this.structures?.dispose();
 
-    this.track = generateTrack(seed);
+    this.track = generateTrack(seed, this.gateCount);
     this.track.seed = seed;
     this.collision = new CollisionWorld(this.track.structures);
     this.structures = new Structures(this.scene, this.track.structures, this.theme);
@@ -326,8 +367,23 @@ export class Game {
     return computeStandings(entries);
   }
 
+  /**
+   * Grid square for the local drone.
+   *
+   * Solo you are always slot 0, at the centre of the grid, with the bots
+   * fanned out around you. Online the relay has already given every player a
+   * unique colour index, so reusing it as the grid slot means the field lines
+   * up on distinct squares without the room needing to agree on anything
+   * else — and without two clients ever being able to pick the same one.
+   */
+  get startSlotIndex() { return this.online ? this.colorIndex : 0; }
+
   _resetDrone() {
-    this.body.reset(this.track.start.position, this.track.start.yaw);
+    this._spectating = null;
+    this._peerView = null;
+    this.body.reset(
+      gridPosition(this.track.start, this.startSlotIndex), this.track.start.yaw,
+    );
     this.boost.reset();
     this.boostFx?.reset();
     this.effects.clear();
@@ -342,13 +398,54 @@ export class Game {
     this._boundWarned = false;
   }
 
-  /** @param {'day'|'night'} theme */
-  setTheme(theme) {
-    if (!THEMES[theme] || theme === this.theme) return;
+  /**
+   * @param {'day'|'night'} theme
+   * @param {{remember?: boolean}} opts `remember: false` applies the theme
+   *        without adopting it as this player's preference — used for the
+   *        host's choice, which should not overwrite what the guest picked
+   *        for their own solo races.
+   */
+  setTheme(theme, { remember = true } = {}) {
+    if (!THEMES[theme]) return;
+    if (remember) {
+      this._preferredTheme = theme;
+      try { localStorage.setItem('dronerun.theme', theme); } catch { /* ignore */ }
+    }
+    if (theme === this.theme) return;
     this.theme = theme;
     this.environment.setTheme(theme);
     this.structures?.setTheme(theme);
-    try { localStorage.setItem('dronerun.theme', theme); } catch { /* ignore */ }
+  }
+
+  /**
+   * Course length, in gates.
+   *
+   * @param {number} n
+   * @param {{remember?: boolean, reload?: boolean}} opts `reload: false`
+   *        defers regeneration to a `loadTrack` the caller is about to do
+   *        anyway, so joining a room does not build two courses.
+   */
+  setGateCount(n, { remember = true, reload = true } = {}) {
+    const count = clampGateCount(n);
+    if (remember) {
+      this._preferredGates = count;
+      try { localStorage.setItem('dronerun.gates', String(count)); } catch { /* ignore */ }
+    }
+    if (count === this.gateCount) return;
+    this.gateCount = count;
+    // Never swap the course out from under a race in progress.
+    if (!reload || this.race?.state !== RaceState.IDLE) return;
+    this.loadTrack(this.seed);
+  }
+
+  /** @param {'solo'|'online'} mode */
+  setMode(mode) {
+    const m = mode === 'online' && relayConfigured() ? 'online' : 'solo';
+    if (m === this.mode) return;
+    this.mode = m;
+    try { localStorage.setItem('dronerun.mode', m); } catch { /* ignore */ }
+    // The start screen shows a different set of controls per mode.
+    this.showStart();
   }
 
   /**
@@ -367,6 +464,9 @@ export class Game {
     this.model.color.setHex(hex);
     // Bot colours are derived from ours, so they have to move out of the way.
     this._buildBots();
+    // Online the slot is also the grid square, so take up the new one right
+    // away — otherwise the drone sits on somebody else's square in the lobby.
+    if (this.race?.state === RaceState.IDLE) this._resetDrone();
   }
 
   setName(name) {
@@ -403,15 +503,33 @@ export class Game {
 
     this.peerProgress.clear();
     this._buildBots();          // clears any bots: online fields are human
-    this.lobby = { room: code, status: 'connecting', players: [], selfId: null, isHost: false, seed: seed ?? this.seed };
+    this.lobby = {
+      room: code, status: 'connecting', players: [], selfId: null, isHost: false,
+      seed: seed ?? this.seed, theme: this.theme, gates: this.gateCount,
+    };
     this._bindLobby(adapter);
     this._renderLobby();
 
     try {
-      const welcome = await adapter.connect(code, this.identity, { seed: seed ?? this.seed });
-      // The room's seed wins: everyone must be on the same course.
-      if (welcome.seed && welcome.seed !== this.seed) this.loadTrack(welcome.seed);
-      writeRoom(code, welcome.seed ?? this.seed);
+      const welcome = await adapter.connect(code, this.identity, {
+        // Proposals, not decisions: the relay uses these only if this player
+        // is the one who opened the room.
+        seed: seed ?? this.seed,
+        theme: this.theme,
+        gates: this.gateCount,
+      });
+      // The room's settings win: everyone must be on the same course, at the
+      // same length, under the same sky. Length is applied without reloading
+      // because the track build below covers it in one pass.
+      Object.assign(this.lobby, {
+        seed: welcome.seed ?? this.seed,
+        theme: welcome.theme ?? this.theme,
+        gates: welcome.gates ?? this.gateCount,
+      });
+      this.setGateCount(this.lobby.gates, { remember: false, reload: false });
+      this.setTheme(this.lobby.theme, { remember: false });
+      this.loadTrack(this.lobby.seed);
+      writeRoom(code, this.lobby.seed);
       this._renderLobby();
     } catch {
       this._renderLobby();
@@ -443,6 +561,17 @@ export class Game {
       this.lobby.seed = seed;
       // Never swap the course mid-race; the relay only sends this in a lobby.
       if (this.race.state === RaceState.IDLE && seed !== this.seed) this.loadTrack(seed);
+      refresh();
+    });
+    adapter.on('theme', ({ theme }) => {
+      this.lobby.theme = theme;
+      // Applied but not remembered — this is the host's choice, not ours.
+      this.setTheme(theme, { remember: false });
+      refresh();
+    });
+    adapter.on('gates', ({ gates }) => {
+      this.lobby.gates = gates;
+      this.setGateCount(gates, { remember: false });
       refresh();
     });
     adapter.on('start', () => {
@@ -495,9 +624,25 @@ export class Game {
       isHost: l.isHost,
       status: l.status,
       canStart,
+      theme: l.theme ?? this.theme,
+      gates: l.gates ?? this.gateCount,
+      gateChoices: GATE_CHOICES,
       onReady: (ready) => this.online.setReady(ready),
       onStartRace: () => this.online.startRace(),
       onNewCourse: () => this.online.setSeed(randomSeed()),
+      // The host's picks go through the relay and come back as broadcasts,
+      // so every client — the host included — applies them by the same path.
+      // The host also remembers its choice, since it really was its own.
+      onTheme: (t) => {
+        this._preferredTheme = t;
+        try { localStorage.setItem('dronerun.theme', t); } catch { /* ignore */ }
+        this.online.setTheme(t);
+      },
+      onGates: (n) => {
+        this._preferredGates = clampGateCount(n);
+        try { localStorage.setItem('dronerun.gates', String(this._preferredGates)); } catch { /* ignore */ }
+        this.online.setGates(n);
+      },
       onCopyInvite: async () => {
         try {
           await navigator.clipboard.writeText(inviteUrl(l.room, l.seed ?? this.seed));
@@ -518,11 +663,14 @@ export class Game {
     this.net = this.local;
     this.fleet.attach(this.local);
     this.peerProgress.clear();
-    this.setColorIndex(0);      // back to the solo slot
-    this._buildBots();          // bots come back for solo play
-    writeSeed(this.seed);
+    this.setColorIndex(0);      // back to the solo slot, and grid square
+    // The room's lighting and course length were the host's; take our own
+    // back. loadTrack below rebuilds at the restored length and also resets
+    // the race, the drone and the bot field.
+    this.setTheme(this._preferredTheme, { remember: false });
+    this.setGateCount(this._preferredGates, { remember: false, reload: false });
     this.race.reset();
-    this._resetDrone();
+    this.loadTrack(this.seed);
     this.gates.setNext(0);
     this.showStart();
   }
@@ -530,6 +678,10 @@ export class Game {
   /** Leave a race and return to the start screen. */
   mainMenu() {
     this._paused = false;
+    this._spectating = null;
+    this._peerView = null;
+    this._finishCard = null;
+    this.hud.setSpectate(null);
     this.hud.setStandings(null, 0);
     if (this.online) {
       // Online, the host controls when everyone comes back, so this is a
@@ -555,10 +707,14 @@ export class Game {
     this.music.pause();
     this.hud.setMuted(this.music.muted);
     this.hud.showStart({
+      mode: this.mode,
       theme: this.theme,
       botCount: this.botCount,
+      gateCount: this.gateCount,
+      gateChoices: GATE_CHOICES,
       online: relayConfigured(),
       name: this.identity.name,
+      onMode: (m) => this.setMode(m),
       onName: (n) => this.setName(n),
       onHost: () => this.goOnline(makeRoomCode(), { create: true, seed: this.seed }),
       onJoin: (code) => this.goOnline(code, { create: false }),
@@ -572,6 +728,7 @@ export class Game {
 
       onTheme: (t) => this.setTheme(t),
       onBots: (n) => this.setBotCount(n),
+      onGates: (n) => this.setGateCount(n),
     });
   }
 
@@ -589,6 +746,8 @@ export class Game {
 
   begin() {
     this.hud.hideModal();
+    this._finishCard = null;
+    this.hud.setSpectate(null);
     this.input.enabled = true;
     this._paused = false;
     this._resetDrone();
@@ -750,6 +909,123 @@ export class Game {
     this.hud.setHeld(null);
   }
 
+  // ── spectating ─────────────────────────────────────────────────────────
+
+  /**
+   * Everyone whose drone can be watched: the bot field solo, the other
+   * pilots online. Rebuilt on demand rather than cached, because a peer can
+   * leave the room mid-race and a cached list would keep a disposed drone in
+   * the carousel.
+   */
+  _spectateTargets() {
+    const out = [];
+    for (const bot of this.bots) {
+      out.push({
+        id: bot.id,
+        name: bot.name,
+        color: bot.model.color.getHex(),
+        body: bot.body,
+        gate: bot.gate,
+        finished: bot.finished,
+      });
+    }
+    for (const [id, peer] of this.fleet.peers) {
+      const p = this._peerProgress(id);
+      out.push({
+        id,
+        name: peer.name ?? 'Pilot',
+        color: peer.model.color.getHex(),
+        // Peers have no physics locally — only an interpolated transform, so
+        // the camera follows them through a PeerView. See core/Spectator.js.
+        group: peer.model.group,
+        gate: p.gate,
+        finished: p.finished,
+      });
+    }
+    return out;
+  }
+
+  /** @returns {boolean} whether there was anybody to watch */
+  startSpectating() {
+    const targets = this._spectateTargets();
+    if (targets.length === 0) return false;
+    this._setSpectate(targets[0].id);
+    return true;
+  }
+
+  /** Step through the field. @param {number} delta +1 or -1 */
+  spectateStep(delta) {
+    const targets = this._spectateTargets();
+    if (targets.length === 0) { this.stopSpectating(); return; }
+    const n = targets.length;
+    const at = targets.findIndex((t) => t.id === this._spectating);
+    const next = at < 0 ? 0 : (((at + delta) % n) + n) % n;
+    this._setSpectate(targets[next].id);
+  }
+
+  _setSpectate(id) {
+    const targets = this._spectateTargets();
+    const target = targets.find((t) => t.id === id);
+    if (!target) { this.stopSpectating(); return; }
+
+    this._spectating = id;
+    this._peerView = target.group ? new PeerView(target.group) : null;
+    // The results card blurs the whole scene, so watching a camera means
+    // putting it away. Esc, or the bar's own button, brings it back.
+    this.hud.hideModal();
+    this._refreshSpectateBar();
+    // Cutting between cameras should cut, not fly the camera across the map.
+    this.rig.reset(this._cameraSubject(0));
+  }
+
+  stopSpectating() {
+    if (this._spectating == null) return;
+    this._spectating = null;
+    this._peerView = null;
+    this.hud.setSpectate(null);
+    this.rig.reset(this.body);
+    // Back to whatever screen we left to go and watch.
+    if (this.race.state === RaceState.FINISHED && this._finishCard) {
+      this._showFinishCard();
+    }
+  }
+
+  /** Keep the bar's gate and status honest while the field is still flying. */
+  _refreshSpectateBar() {
+    if (this._spectating == null) return;
+    const targets = this._spectateTargets();
+    const at = targets.findIndex((t) => t.id === this._spectating);
+    if (at < 0) { this.stopSpectating(); return; }
+    const t = targets[at];
+    this.hud.setSpectate({
+      name: t.name,
+      color: t.color,
+      gate: t.gate,
+      total: this.race.total,
+      finished: t.finished,
+      position: at + 1,
+      count: targets.length,
+    });
+  }
+
+  /**
+   * What the chase camera is following this frame.
+   * @param {number} dt used to differentiate a peer's velocity
+   */
+  _cameraSubject(dt) {
+    if (this._spectating == null) return this.body;
+    const target = this._spectateTargets().find((t) => t.id === this._spectating);
+    if (!target) {
+      // Whoever we were watching has gone. Fall back rather than freeze.
+      this._spectating = null;
+      this._peerView = null;
+      this.hud.setSpectate(null);
+      return this.body;
+    }
+    if (target.body) return target.body;
+    return this._peerView ? this._peerView.update(dt) : this.body;
+  }
+
   /** Recover from being wedged in geometry or lost off the map. */
   respawn() {
     if (this.race.state !== RaceState.RACING) return;
@@ -758,7 +1034,9 @@ export class Game {
     const target = this.track.checkpoints[idx];
 
     if (idx === 0) {
-      this.body.reset(this.track.start.position, this.track.start.yaw);
+      this.body.reset(
+        gridPosition(this.track.start, this.startSlotIndex), this.track.start.yaw,
+      );
     } else {
       const prev = this.track.checkpoints[idx - 1];
       // Sit just past the last gate we cleared, facing the next one.
@@ -793,20 +1071,35 @@ export class Game {
     const standings = this._standings();
     const position = standings.findIndex((e) => e.isPlayer) + 1;
     this.hud.setStandings(standings, this.race.total);
-    this.hud.showFinish({
+
+    // Held so the card can be reopened: going off to watch another drone
+    // dismisses it, and coming back has to rebuild exactly the same results
+    // rather than an approximation of them.
+    this._finishCard = {
       time,
       isRecord,
-      splits: this.race.splits,
+      splits: [...this.race.splits],
       best: this.race.best,
       compare: prevBest,
       seed: this.seed,
       position,
       fieldSize: standings.length,
+    };
+    this._showFinishCard();
+    this.net.sendEvent('finish', { time });
+  }
+
+  _showFinishCard() {
+    if (!this._finishCard) return;
+    this.hud.showFinish({
+      ...this._finishCard,
+      // Watching is only on offer when there is somebody out there to watch.
+      canSpectate: this._spectateTargets().length > 0,
+      onSpectate: () => this.startSpectating(),
       onRestart: () => this.restart(),
       onNewTrack: () => this.newTrack(),
       onMainMenu: () => this.mainMenu(),
     });
-    this.net.sendEvent('finish', { time });
   }
 
   // ── frame ──────────────────────────────────────────────────────────────
@@ -912,7 +1205,7 @@ export class Game {
     this.music.update(dt);
     this.gates.update(dt);
     this.fleet.update(dt);
-    this.rig.update(this.body, dt, this.collision);
+    this.rig.update(this._cameraSubject(dt), dt, this.collision);
     this.environment.update(this.body.position);
 
     this._enforceBounds();
@@ -928,6 +1221,7 @@ export class Game {
       this._boardAccum = 0;
       const onMenu = this.race.state === RaceState.IDLE;
       this.hud.setStandings(onMenu ? null : this._standings(), this.race.total);
+      this._refreshSpectateBar();
     }
   }
 
@@ -1018,12 +1312,54 @@ export class Game {
       scrambled: this.effects.scrambled,
     });
 
-    const next = this.effects.scrambled ? null : this.race.nextCheckpoint;
+    // The boost ring rides on the drone itself, so it needs the drone's
+    // screen position. Hidden while spectating: it belongs to a craft that is
+    // not the one on screen.
+    const racing = this.race.state === RaceState.RACING
+      || this.race.state === RaceState.COUNTDOWN;
+    if (racing && this._spectating == null) {
+      const at = this._project(this.body.position);
+      this.hud.setBoostRing({
+        visible: at.visible,
+        x: at.x,
+        y: at.y,
+        fraction: this.boost.fraction,
+        active: this.boost.active,
+        locked: this.boost.locked,
+      });
+    } else {
+      this.hud.setBoostRing({ visible: false });
+    }
+
+    // Spectating, the next-gate cue would be pointing out of somebody else's
+    // camera at your own gate.
+    const next = this.effects.scrambled || this._spectating != null
+      ? null
+      : this.race.nextCheckpoint;
     if (next) {
       this.hud.setChevron(this.indicator.compute(next.position, this.camera, this._viewport()));
     } else {
       this.hud.setChevron({ visible: false });
     }
+  }
+
+  /**
+   * World point -> screen pixels, or `visible: false` when it is behind the
+   * lens. Camera space is checked first because NDC alone cannot tell you
+   * that: the perspective divide flips the signs behind the camera and a
+   * point behind you projects to a plausible-looking on-screen position.
+   */
+  _project(point) {
+    this._camSpace ??= new THREE.Vector3();
+    this._ndc ??= new THREE.Vector3();
+    const v = this._camSpace.copy(point).applyMatrix4(this.camera.matrixWorldInverse);
+    if (v.z > -0.1) return { visible: false, x: 0, y: 0 };
+    const ndc = this._ndc.copy(point).project(this.camera);
+    const { width, height } = this._viewport();
+    const x = (ndc.x * 0.5 + 0.5) * width;
+    const y = (-ndc.y * 0.5 + 0.5) * height;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return { visible: false, x: 0, y: 0 };
+    return { visible: true, x, y };
   }
 
   dispose() {

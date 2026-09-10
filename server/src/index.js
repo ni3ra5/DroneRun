@@ -32,6 +32,28 @@
 const MAX_PLAYERS = 8;
 const COUNTDOWN_MS = 3000;
 
+/**
+ * Settings the host owns on everyone's behalf.
+ *
+ * A race is only a race if every client builds the same course, so the seed
+ * and the gate count have to agree. Lighting does not strictly have to — it
+ * changes nothing about the geometry — but a room where half the field is
+ * flying at night and half in daylight is not the shared event the lobby
+ * implies, so it is settled the same way.
+ */
+const DEFAULT_THEME = 'night';
+const DEFAULT_GATES = 16;
+const MIN_GATES = 8;
+const MAX_GATES = 28;
+
+const cleanTheme = (v) => (v === 'day' || v === 'night' ? v : null);
+
+const cleanGates = (v) => {
+  const n = Math.round(Number(v));
+  if (!Number.isFinite(n)) return null;
+  return Math.max(MIN_GATES, Math.min(MAX_GATES, n));
+};
+
 const json = (body, status = 200) => new Response(JSON.stringify(body), {
   status,
   headers: { 'content-type': 'application/json', 'access-control-allow-origin': '*' },
@@ -194,10 +216,15 @@ export class RaceRoom {
 
         let seed = await this.state.storage.get('seed');
         if (!seed) {
-          // First player through the door sets the course.
+          // First player through the door sets the course, its length and
+          // the lighting. Everyone after them inherits all three.
           seed = String(msg.seed ?? 'shared-course').slice(0, 64);
           await this.state.storage.put('seed', seed);
+          await this.state.storage.put('theme', cleanTheme(msg.theme) ?? DEFAULT_THEME);
+          await this.state.storage.put('gates', cleanGates(msg.gates) ?? DEFAULT_GATES);
         }
+        const theme = (await this.state.storage.get('theme')) ?? DEFAULT_THEME;
+        const gates = (await this.state.storage.get('gates')) ?? DEFAULT_GATES;
         const phase = (await this.state.storage.get('phase')) ?? 'lobby';
 
         const roster = this._roster();
@@ -206,6 +233,8 @@ export class RaceRoom {
           you: meta.id,
           yourColorIndex: meta.colorIndex,
           seed,
+          theme,
+          gates,
           phase,
           host: this._hostId(roster),
           players: this._players(roster),
@@ -234,6 +263,31 @@ export class RaceRoom {
         if (!seed) return;
         await this.state.storage.put('seed', seed);
         this._broadcast({ t: 'seed', seed });
+        return;
+      }
+
+      case 'theme': {
+        // Same rule as the seed: host only, lobby only.
+        const roster = this._roster();
+        if (this._hostId(roster) !== meta.id) return;
+        if (((await this.state.storage.get('phase')) ?? 'lobby') !== 'lobby') return;
+        const theme = cleanTheme(msg.theme);
+        if (!theme) return;
+        await this.state.storage.put('theme', theme);
+        // Broadcast to everyone including the host, so every client applies
+        // the change by the same path and cannot drift out of agreement.
+        this._broadcast({ t: 'theme', theme });
+        return;
+      }
+
+      case 'gates': {
+        const roster = this._roster();
+        if (this._hostId(roster) !== meta.id) return;
+        if (((await this.state.storage.get('phase')) ?? 'lobby') !== 'lobby') return;
+        const gates = cleanGates(msg.gates);
+        if (gates == null) return;
+        await this.state.storage.put('gates', gates);
+        this._broadcast({ t: 'gates', gates });
         return;
       }
 

@@ -6,6 +6,7 @@ import { DroneModel } from '../drone/DroneModel.js';
 import { Boost } from '../drone/Boost.js';
 import { crossedGate } from './Race.js';
 import { Effects } from './PowerUps.js';
+import { gridPosition } from './Grid.js';
 
 /**
  * A computer-controlled racer.
@@ -114,27 +115,16 @@ export class Bot {
     this._scratch = new THREE.Vector3();
     this._q = new THREE.Quaternion();
 
-    // Starting grid: fan the field out around the player's slot. The course
-    // guarantees 8.5 m of clearance around the racing line, so these stay
-    // comfortably inside it.
-    const slots = [
-      [-2.6, 0], [2.6, 0], [-5.2, 0], [5.2, 0],
-      [-1.3, 2.8], [1.3, 2.8], [0, -2.6],
-    ];
-    this.startOffset = slots[index % slots.length];
+    // Starting grid. Slot 0 belongs to the player, so the bots fill the rest
+    // of the same shared grid the online field uses — see race/Grid.js.
+    this.startSlot = index + 1;
     this.reset();
   }
 
   reset() {
     this.effects?.clear();
     const s = this.track.start;
-    // Offset sideways in the start heading's frame, and vertically.
-    const right = this._scratch.set(1, 0, 0).applyAxisAngle(UP, s.yaw);
-    const pos = s.position.clone()
-      .addScaledVector(right, this.startOffset[0]);
-    pos.y += this.startOffset[1];
-
-    this.body.reset(pos, s.yaw);
+    this.body.reset(gridPosition(s, this.startSlot, this._scratch), s.yaw);
     this.boost.reset();
     this.model.clearTrail();
     this.model.update(this.body, 1 / 60);

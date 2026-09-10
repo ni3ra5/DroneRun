@@ -99,20 +99,31 @@ html, body {
 }
 .gauge.centred i { bottom: 50%; }
 
-/* Boost reserve. Horizontal, because it reads as a depleting resource
-   rather than an instantaneous reading like throttle or vertical speed. */
-.bar {
-  width: 92px; height: 9px; position: relative; overflow: hidden;
-  background: rgba(160, 190, 220, 0.14);
+/* ── boost reserve, wrapped around the drone ────────────────────────────── */
+/* A half ring on the drone's right-hand side, tracking it in screen space.
+   Boost is the one resource you spend with your eyes on the gate ahead, so it
+   is drawn where the eyes already are rather than in the corner cluster. The
+   arc fills from the bottom up. */
+#boostring {
+  position: absolute; left: 0; top: 0; width: 132px; height: 132px;
+  margin: -66px 0 0 -66px; will-change: transform; opacity: 0;
+  transition: opacity 0.18s linear;
 }
-.bar i {
-  position: absolute; inset: 0 auto 0 0; width: 100%;
-  background: linear-gradient(to right, #ffb028, #ffe49a);
+#boostring svg { width: 100%; height: 100%; overflow: visible; }
+#boostring path {
+  fill: none; stroke-width: 3.4; stroke-linecap: round;
+  /* Dashed to the full arc length (40π ≈ 125.66) so the fill can be revealed
+     by offsetting the dash. */
+  stroke-dasharray: 125.664;
 }
-.bar.active { box-shadow: 0 0 12px rgba(255, 176, 40, 0.6); }
-.bar.active i { background: linear-gradient(to right, #ffd27a, #fff3cc); }
+#boostring .track { stroke: rgba(160, 190, 220, 0.2); stroke-dashoffset: 0; }
+#boostring .fill {
+  stroke: #ffb028; stroke-dashoffset: 125.664;
+  transition: stroke-dashoffset 0.08s linear, stroke 0.18s linear;
+}
+#boostring.active .fill { stroke: #fff3cc; filter: drop-shadow(0 0 6px rgba(255, 210, 122, 0.85)); }
 /* Drained: red and unusable until it recovers past the re-engage threshold. */
-.bar.locked i { background: rgba(255, 77, 126, 0.5); }
+#boostring.locked .fill { stroke: rgba(255, 77, 126, 0.7); }
 
 #hud-flight .label kbd { font-size: 8.5px; padding: 0 3px; margin-left: 3px; }
 
@@ -237,6 +248,30 @@ kbd {
 #hud-mute.muted { color: var(--accent-2); border-color: rgba(255, 77, 126, 0.4); }
 #hud-mute.muted .wave { display: none; }
 #hud-mute.muted .slash { display: block; }
+
+/* ── spectate bar, bottom centre ────────────────────────────────────────── */
+/* Sits where the results card's action row was, so the eye lands on the same
+   place after the card is dismissed to reveal the camera behind it. */
+#spectate {
+  position: absolute; bottom: 22px; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: stretch; gap: 8px; pointer-events: auto;
+  padding: 8px; background: rgba(9, 14, 25, 0.9);
+  border: 1px solid var(--line);
+}
+#spectate .spec-body {
+  display: flex; flex-direction: column; gap: 3px;
+  justify-content: center; min-width: 190px; padding: 0 6px;
+}
+#spectate .label i { font-style: normal; color: var(--dim); }
+#spectate .spec-who {
+  display: flex; align-items: center; gap: 7px;
+  font-family: var(--mono); font-size: 12px;
+}
+#spectate .spec-who b { font-weight: 600; }
+#spectate .spec-who span { color: var(--dim); font-size: 11px; }
+#spectate .sb-dot { width: 7px; height: 7px; flex: 0 0 auto; }
+#spectate button { min-width: 40px; }
+#spectate button[data-spec-exit] { min-width: auto; }
 
 /* ── off-screen checkpoint indicator ───────────────────────────────────── */
 #chevron {
@@ -403,6 +438,19 @@ button:disabled:hover { background: rgba(255, 255, 255, 0.05); }
   border-left: 2px solid var(--warn); padding: 2px 0 2px 10px; margin-bottom: 20px;
 }
 
+/* A room setting this player does not control. */
+.lobby-fixed {
+  font-family: var(--mono); font-size: 12px; color: var(--dim);
+  padding: 5px 0 1px;
+}
+
+/* A quiet explanatory line under a field or an action row. */
+.sub-note {
+  font-size: 11.5px; color: var(--dim); line-height: 1.5;
+  margin-top: 8px; max-width: 46em;
+}
+.sub-note b { color: var(--ink); font-weight: 500; }
+
 .hidden { display: none !important; }
 
 @media (max-width: 900px), (max-height: 560px) {
@@ -411,10 +459,19 @@ button:disabled:hover { background: rgba(255, 255, 255, 0.05); }
   #hud-compass { transform: translateX(-50%) scale(0.82); transform-origin: top center; }
 }
 
+/* Spectating: the corner instruments all read the player's own drone, so they
+   are stood down rather than left showing a craft that is not on screen. */
+#overlay.spectating #hud-flight,
+#overlay.spectating #hud-keys,
+#overlay.spectating #hud-gate,
+#overlay.spectating #hud-alt,
+#overlay.spectating #hud-compass { display: none; }
+
 /* Fade the flight HUD out while a modal owns the screen. */
 #overlay.modal-open .panel,
 #overlay.modal-open #hud-effects,
 #overlay.modal-open #chevron,
+#overlay.modal-open #boostring,
 #overlay.modal-open #hud-compass,
 #overlay.modal-open #hud-alt { opacity: 0.12; }
 /* ...except the music toggle, which stays usable from the menu. */

@@ -22,6 +22,9 @@ const KEYMAP_ROWS = [
   ['<kbd>Esc</kbd>', 'Pause / main menu'],
 ];
 
+/** Length of the boost ring's arc: a semicircle of radius 40 in user units. */
+const ARC_LENGTH = Math.PI * 40;
+
 const EFFECT_LABELS = {
   STUNNED: { label: 'Hit', color: '#ff4d7e' },
   ROTOR_JAM: { label: 'Rotor jam', color: '#ffb028' },
@@ -90,10 +93,6 @@ export class HUD {
           <div class="label">V/S</div>
           <div class="gauge centred"><i data-vsi></i></div>
         </div>
-        <div class="stack" style="min-width:96px">
-          <div class="label">Boost <kbd>Shift</kbd></div>
-          <div class="bar" data-boostbar><i data-boost></i></div>
-        </div>
       </div>
 
       <div class="panel" id="hud-keys">
@@ -112,6 +111,13 @@ export class HUD {
         </svg>
         <span data-mute>Music</span>
       </button>
+
+      <div id="boostring">
+        <svg viewBox="0 0 100 100" aria-hidden="true">
+          <path class="track" d="M 50 90 A 40 40 0 0 0 50 10"/>
+          <path class="fill" d="M 50 90 A 40 40 0 0 0 50 10"/>
+        </svg>
+      </div>
 
       <div id="chevron">
         <svg viewBox="0 0 62 62">
@@ -134,6 +140,20 @@ export class HUD {
 
       <div id="hud-effects"></div>
 
+      <div id="spectate" class="hidden">
+        <button type="button" data-spec-prev aria-label="Previous drone">&#9664;</button>
+        <span class="spec-body">
+          <span class="label">Watching <i data-spec-pos></i></span>
+          <span class="spec-who">
+            <i class="sb-dot" data-spec-dot></i>
+            <b data-spec-name></b>
+            <span data-spec-state></span>
+          </span>
+        </span>
+        <button type="button" data-spec-next aria-label="Next drone">&#9654;</button>
+        <button type="button" class="primary" data-spec-exit>Results <kbd>Esc</kbd></button>
+      </div>
+
       <div id="speedfx"></div>
       <div id="centre"><div id="countdown"></div></div>
       <div id="toast"></div>
@@ -153,8 +173,8 @@ export class HUD {
       alt: q('[data-alt]'),
       throttle: q('[data-throttle]'),
       vsi: q('[data-vsi]'),
-      boost: q('[data-boost]'),
-      boostBar: q('[data-boostbar]'),
+      boostRing: q('#boostring'),
+      boostArc: q('#boostring .fill'),
       chevron: q('#chevron'),
       chevronDist: q('[data-chevdist]'),
       countdown: q('#countdown'),
@@ -168,11 +188,27 @@ export class HUD {
       effects: q('#hud-effects'),
       mute: q('[data-mute]'),
       muteButton: q('#hud-mute'),
+      spectate: q('#spectate'),
+      specDot: q('[data-spec-dot]'),
+      specName: q('[data-spec-name]'),
+      specState: q('[data-spec-state]'),
+      specPos: q('[data-spec-pos]'),
     };
 
     /** Assigned by Game; the mute control is button-only (M is descend). */
     this.onMute = null;
     this.el.muteButton.addEventListener('click', () => this.onMute?.());
+
+    /**
+     * Spectate controls. Bound once here rather than per-render: the bar is a
+     * persistent element that only has its text rewritten, so rebinding it
+     * every frame would be pure churn.
+     */
+    this.onSpectateStep = null;
+    this.onSpectateExit = null;
+    q('[data-spec-prev]').addEventListener('click', () => this.onSpectateStep?.(-1));
+    q('[data-spec-next]').addEventListener('click', () => this.onSpectateStep?.(1));
+    q('[data-spec-exit]').addEventListener('click', () => this.onSpectateExit?.());
 
     this.compass = new Compass(q('#hud-compass'));
     this.altitude = new AltitudeTape(q('#hud-alt canvas'));
@@ -217,10 +253,6 @@ export class HUD {
     el.speedfx.style.opacity = fx.toFixed(3);
 
     if (s.effects) this.setEffects(s.effects);
-
-    el.boost.style.width = `${Math.round(s.boost * 100)}%`;
-    const boostCls = s.boostLocked ? 'bar locked' : s.boostActive ? 'bar active' : 'bar';
-    if (el.boostBar.className !== boostCls) el.boostBar.className = boostCls;
 
     if (this._pips) {
       for (let i = 0; i < this._pips.length; i++) {
@@ -282,6 +314,41 @@ export class HUD {
     }
   }
 
+  /**
+   * Show or hide the spectate bar.
+   *
+   * @param {?{name:string, color:number, gate:number, total:number,
+   *           finished:boolean, position:number, count:number}} info
+   *        null hides the bar.
+   */
+  setSpectate(info) {
+    const el = this.el.spectate;
+    el.classList.toggle('hidden', !info);
+    // Every instrument in the corners reads the *player's* drone, which is
+    // not the one on screen while spectating. Rather than feed them somebody
+    // else's telemetry, stand them down and leave the clock and the
+    // standings, which are about the race rather than about one craft.
+    this.root.classList.toggle('spectating', Boolean(info));
+    if (!info) return;
+    const hex = `#${info.color.toString(16).padStart(6, '0')}`;
+    // Called several times a second while the field is still flying, so each
+    // write is guarded — the bar is otherwise re-laid-out for nothing.
+    const set = (node, key, value) => {
+      if (this[key] === value) return;
+      this[key] = value;
+      node.textContent = value;
+    };
+    if (this._specHex !== hex) {
+      this._specHex = hex;
+      this.el.specDot.style.background = hex;
+      this.el.specName.style.color = hex;
+    }
+    set(this.el.specName, '_specName', info.name);
+    set(this.el.specPos, '_specPos', `${info.position} / ${info.count}`);
+    set(this.el.specState, '_specState',
+      info.finished ? 'finished' : `gate ${Math.min(info.gate + 1, info.total)} of ${info.total}`);
+  }
+
   /** @param {Array} standings @param {number} total gates on the course */
   setStandings(standings, total) {
     if (!standings || standings.length < 2) {
@@ -329,6 +396,31 @@ export class HUD {
     this._toastTimer = setTimeout(() => { el.style.opacity = '0'; }, 1300);
   }
 
+  /**
+   * The boost reserve, drawn as a half ring around the drone itself.
+   *
+   * It lives beside the drone rather than in the instrument cluster because
+   * boost is the one resource you spend while looking at the gate ahead —
+   * having to flick down to the bottom-left corner to check it is exactly
+   * when you cannot afford to. The arc fills from the bottom up.
+   *
+   * @param {{visible:boolean, x?:number, y?:number, fraction?:number,
+   *          active?:boolean, locked?:boolean}} o
+   */
+  setBoostRing({ visible, x, y, fraction = 0, active = false, locked = false }) {
+    const el = this.el.boostRing;
+    // Same rule as the chevron: never write a non-finite value into the DOM.
+    const ok = visible && Number.isFinite(x) && Number.isFinite(y);
+    el.style.opacity = ok ? '1' : '0';
+    if (!ok) return;
+    el.style.transform = `translate(${x}px, ${y}px)`;
+    const f = Math.max(0, Math.min(1, fraction));
+    // The arc is a 40-unit radius semicircle, so its length is 40π.
+    this.el.boostArc.style.strokeDashoffset = String(ARC_LENGTH * (1 - f));
+    const cls = locked ? 'locked' : active ? 'active' : '';
+    if (el.className !== cls) el.className = cls;
+  }
+
   /** Position the off-screen indicator. See Indicator.js for the projection. */
   setChevron({ visible, x, y, angle, distance }) {
     const el = this.el.chevron;
@@ -362,8 +454,97 @@ export class HUD {
     this.root.classList.remove('modal-open');
   }
 
-  showStart({ theme, botCount, online, name, seedIsExplicit, onStart, onTheme, onBots, onHost, onJoin, onName, onStartRandom }) {
+  /**
+   * A segmented radio group. Buttons carry `data-<key>` so one delegated
+   * handler per group can find them again after a re-render.
+   */
+  static _segmented(key, options, current) {
+    return `<div class="segmented" role="radiogroup">${options.map(({ value, label }) => `
+      <button role="radio" data-${key}="${value}"
+              aria-checked="${String(value) === String(current)}">${label}</button>
+    `).join('')}</div>`;
+  }
+
+  /** Wire a segmented group built by _segmented. */
+  static _bindSegmented(modal, key, handler) {
+    const all = modal.querySelectorAll(`[data-${key}]`);
+    all.forEach((btn) => {
+      btn.onclick = () => {
+        all.forEach((o) => o.setAttribute('aria-checked', 'false'));
+        btn.setAttribute('aria-checked', 'true');
+        handler(btn.dataset[key]);
+      };
+    });
+  }
+
+  /**
+   * The start screen.
+   *
+   * Solo or online is the first thing asked, because it decides whether the
+   * rest of the settings are even this player's to make: online, the course,
+   * its length and the lighting all belong to the host, so showing those
+   * controls here would be offering choices the room will overrule.
+   */
+  showStart({
+    mode, theme, botCount, gateCount, gateChoices, online, name, seedIsExplicit,
+    onMode, onStart, onTheme, onBots, onGates, onHost, onJoin, onName, onStartRandom,
+  }) {
     const keymap = KEYMAP_ROWS.map(([k, d]) => `<div>${k}</div><b>${d}</b>`).join('');
+    const solo = mode !== 'online';
+
+    const modeField = `
+      <div class="field">
+        <div class="label">How are you racing?</div>
+        ${HUD._segmented('mode', [
+          { value: 'solo', label: 'Solo' },
+          { value: 'online', label: 'Online' },
+        ], solo ? 'solo' : 'online')}
+        ${online ? '' : `
+          <div class="sub-note">Online play needs a relay URL in
+          <span style="font-family:var(--mono)">src/config.js</span></div>`}
+      </div>
+    `;
+
+    const soloFields = `
+      <div class="field">
+        <div class="label">Bots in the lobby</div>
+        ${HUD._segmented('bots', [0, 3, 5, 7].map((n) => ({ value: n, label: n || 'None' })), botCount)}
+      </div>
+
+      <div class="field">
+        <div class="label">Checkpoints</div>
+        ${HUD._segmented('gates', gateChoices.map((n) => ({ value: n, label: n })), gateCount)}
+      </div>
+
+      <div class="field">
+        <div class="label">Lighting</div>
+        ${HUD._segmented('theme', [
+          { value: 'night', label: 'Night' },
+          { value: 'day', label: 'Day' },
+        ], theme)}
+      </div>
+    `;
+
+    const onlineFields = `
+      <div class="field">
+        <div class="label">Room</div>
+        <div class="row">
+          <button data-host>Create a race</button>
+          <input type="text" data-joincode placeholder="ROOM CODE" maxlength="5"
+                 style="width:120px;text-transform:uppercase" spellcheck="false" />
+          <button data-join>Join</button>
+        </div>
+        <div class="sub-note">
+          Up to 8 pilots, each given their own colour and grid square. The host
+          picks the course, its length and the lighting for everyone.
+        </div>
+      </div>
+    `;
+
+    const soloActions = seedIsExplicit
+      ? `<button class="primary" data-start>Race the shared course &nbsp;&rarr;</button>
+         <button data-random>New course instead</button>`
+      : '<button class="primary" data-start>Start race &nbsp;&rarr;</button>';
 
     const modal = this._openModal(`
       <div class="card">
@@ -376,6 +557,8 @@ export class HUD {
           them in order; the amber ring is always your next one.
         </p>
 
+        ${modeField}
+
         <div class="field">
           <div class="label">Pilot name</div>
           <div class="row">
@@ -385,22 +568,7 @@ export class HUD {
           </div>
         </div>
 
-        <div class="field">
-          <div class="label">Bots in the lobby</div>
-          <div class="segmented" role="radiogroup">
-            ${[0, 3, 5, 7].map((n) => `
-              <button role="radio" data-bots="${n}" aria-checked="${n === botCount}">${n || 'None'}</button>
-            `).join('')}
-          </div>
-        </div>
-
-        <div class="field">
-          <div class="label">Lighting</div>
-          <div class="segmented" role="radiogroup">
-            <button role="radio" data-theme="night" aria-checked="${theme === 'night'}">Night</button>
-            <button role="radio" data-theme="day" aria-checked="${theme === 'day'}">Day</button>
-          </div>
-        </div>
+        ${solo ? soloFields : onlineFields}
 
         <div class="label">Controls</div>
         <div class="keymap">${keymap}</div>
@@ -412,18 +580,7 @@ export class HUD {
           since <b>M</b> is the descend key.
         </div>
 
-        <div class="row">
-          ${seedIsExplicit
-            ? `<button class="primary" data-start>Race the shared course &nbsp;&rarr;</button>
-               <button data-random>New course instead</button>`
-            : '<button class="primary" data-start>Start solo &nbsp;&rarr;</button>'}
-          ${online
-            ? `<button data-host>Create online race</button>
-               <input type="text" data-joincode placeholder="ROOM CODE" maxlength="5"
-                      style="width:120px;text-transform:uppercase" spellcheck="false" />
-               <button data-join>Join</button>`
-            : '<span style="font-size:11.5px;color:var(--dim)">Online play needs a relay URL in src/config.js</span>'}
-        </div>
+        ${solo ? `<div class="row">${soloActions}</div>` : ''}
       </div>
     `);
 
@@ -433,46 +590,45 @@ export class HUD {
     nameInput.onchange = () => onName(nameInput.value);
     nameInput.onkeydown = (e) => e.stopPropagation();
     const commitName = () => onName(nameInput.value);
-    modal.querySelector('[data-start]').onclick = () => {
+
+    // Switching mode re-renders this whole screen, so the name in the field
+    // has to be committed first or it is lost.
+    HUD._bindSegmented(modal, 'mode', (m) => {
       commitName();
-      onStart();
-    };
-    // Only shown when a specific seed arrived from a link.
-    modal.querySelector('[data-random]')?.addEventListener('click', () => {
-      commitName();
-      onStartRandom();
+      onMode(m);
     });
-    modal.querySelectorAll('[data-bots]').forEach((btn) => {
-      btn.onclick = () => {
-        modal.querySelectorAll('[data-bots]').forEach((o) => o.setAttribute('aria-checked', 'false'));
-        btn.setAttribute('aria-checked', 'true');
-        onBots(Number(btn.dataset.bots));
-      };
-    });
-    modal.querySelectorAll('[data-theme]').forEach((btn) => {
-      btn.onclick = () => {
-        modal.querySelectorAll('[data-theme]').forEach((o) => o.setAttribute('aria-checked', 'false'));
-        btn.setAttribute('aria-checked', 'true');
-        onTheme(btn.dataset.theme);
-      };
-    });
-    if (online) {
-      modal.querySelector('[data-host]').onclick = () => {
+
+    if (solo) {
+      modal.querySelector('[data-start]').onclick = () => {
         commitName();
-        onHost();
+        onStart();
       };
-      const codeInput = modal.querySelector('[data-joincode]');
-      const join = () => {
+      // Only shown when a specific seed arrived from a link.
+      modal.querySelector('[data-random]')?.addEventListener('click', () => {
         commitName();
-        const code = codeInput.value.trim().toUpperCase();
-        if (code) onJoin(code);
-      };
-      modal.querySelector('[data-join]').onclick = join;
-      codeInput.onkeydown = (e) => {
-        if (e.key === 'Enter') join();
-        e.stopPropagation();
-      };
+        onStartRandom();
+      });
+      HUD._bindSegmented(modal, 'bots', (v) => onBots(Number(v)));
+      HUD._bindSegmented(modal, 'gates', (v) => onGates(Number(v)));
+      HUD._bindSegmented(modal, 'theme', (v) => onTheme(v));
+      return;
     }
+
+    modal.querySelector('[data-host]').onclick = () => {
+      commitName();
+      onHost();
+    };
+    const codeInput = modal.querySelector('[data-joincode]');
+    const join = () => {
+      commitName();
+      const code = codeInput.value.trim().toUpperCase();
+      if (code) onJoin(code);
+    };
+    modal.querySelector('[data-join]').onclick = join;
+    codeInput.onkeydown = (e) => {
+      if (e.key === 'Enter') join();
+      e.stopPropagation();
+    };
   }
 
   /**
@@ -484,8 +640,8 @@ export class HUD {
    * are simpler to rebind than to reconcile.
    */
   showLobby({
-    room, seed, players, selfId, isHost, status, canStart,
-    onReady, onStartRace, onNewCourse, onCopyInvite, onLeave,
+    room, seed, players, selfId, isHost, status, canStart, theme, gates, gateChoices,
+    onReady, onStartRace, onNewCourse, onCopyInvite, onLeave, onTheme, onGates,
   }) {
     const me = players.find((p) => p.id === selfId);
     const rows = players.map((p) => `
@@ -525,6 +681,23 @@ export class HUD {
           </div>
         </div>
 
+        <div class="field">
+          <div class="label">Checkpoints</div>
+          ${isHost
+            ? HUD._segmented('gates', gateChoices.map((n) => ({ value: n, label: n })), gates)
+            : `<div class="lobby-fixed">${gates} &mdash; set by the host</div>`}
+        </div>
+
+        <div class="field">
+          <div class="label">Lighting</div>
+          ${isHost
+            ? HUD._segmented('theme', [
+              { value: 'night', label: 'Night' },
+              { value: 'day', label: 'Day' },
+            ], theme)
+            : `<div class="lobby-fixed">${theme === 'day' ? 'Day' : 'Night'} &mdash; set by the host</div>`}
+        </div>
+
         <div class="label">Pilots</div>
         <div class="lobby-rows">${rows}</div>
 
@@ -548,6 +721,8 @@ export class HUD {
 
     if (isHost) {
       modal.querySelector('[data-newcourse]').onclick = () => onNewCourse();
+      HUD._bindSegmented(modal, 'gates', (v) => onGates(Number(v)));
+      HUD._bindSegmented(modal, 'theme', (v) => onTheme(v));
       const startBtn = modal.querySelector('[data-startrace]');
       if (canStart) startBtn.onclick = onStartRace;
     } else {
@@ -560,7 +735,10 @@ export class HUD {
    * @param {?object} o.compare the best that stood *before* this run, so a
    *        record run is measured against what it beat rather than itself
    */
-  showFinish({ time, isRecord, splits, best, compare, seed, position, fieldSize, onRestart, onNewTrack, onMainMenu }) {
+  showFinish({
+    time, isRecord, splits, best, compare, seed, position, fieldSize,
+    canSpectate, onSpectate, onRestart, onNewTrack, onMainMenu,
+  }) {
     const rows = splits.map((t, i) => {
       const prev = i === 0 ? 0 : splits[i - 1];
       const refSplit = compare?.splits?.[i];
@@ -596,12 +774,20 @@ export class HUD {
         <div class="row">
           <button class="primary" data-restart>Same track</button>
           <button data-new>New track</button>
+          ${canSpectate ? '<button data-watch>Watch the field</button>' : ''}
           <button data-menu>Main menu</button>
         </div>
+        ${canSpectate ? `
+          <div class="sub-note">
+            Watching puts you in another pilot's chase camera. Step through the
+            field with the arrows or <b>Enter</b>, and <b>Esc</b> brings these
+            results back.
+          </div>` : ''}
       </div>
     `);
     modal.querySelector('[data-restart]').onclick = onRestart;
     modal.querySelector('[data-new]').onclick = onNewTrack;
+    modal.querySelector('[data-watch]')?.addEventListener('click', () => onSpectate());
     modal.querySelector('[data-menu]').onclick = onMainMenu;
   }
 

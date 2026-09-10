@@ -22,35 +22,69 @@ const MAX_RADIUS = 330;   // keep the course inside a comfortable play area
 
 const DEG = Math.PI / 180;
 
-export function generateTrack(seed, gateCount = 16) {
+/**
+ * Course length, in gates. The floor is what the direction quota needs: a
+ * course shorter than this cannot carry two climbs, two dives and a hairpin
+ * as well as an opening run-up, so it would fail verification and fall back
+ * to an unverified track. The ceiling is a play-area limit rather than a
+ * generator one — the walk is pulled back toward the middle as it wanders,
+ * and past this many legs it spends most of its length doing that.
+ */
+export const MIN_GATES = 8;
+export const MAX_GATES = 28;
+/** The lengths offered in the UI. */
+export const GATE_CHOICES = [8, 12, 16, 22];
+export const DEFAULT_GATES = 16;
+
+export function clampGateCount(n) {
+  const v = Math.round(Number(n));
+  if (!Number.isFinite(v)) return DEFAULT_GATES;
+  return Math.max(MIN_GATES, Math.min(MAX_GATES, v));
+}
+
+export function generateTrack(seed, gateCount = DEFAULT_GATES) {
+  const gates = clampGateCount(gateCount);
   // A handful of attempts is always enough; the fallback is still playable.
   for (let attempt = 0; attempt < 12; attempt++) {
-    const track = buildTrack(`${seed}#${attempt}`, gateCount);
+    const track = buildTrack(`${seed}#${attempt}`, gates);
     if (verifyTrack(track)) {
       track.seed = seed;
       track.attempt = attempt;
       return track;
     }
   }
-  const track = buildTrack(`${seed}#fallback`, gateCount);
+  const track = buildTrack(`${seed}#fallback`, gates);
   track.seed = seed;
   return track;
 }
 
-/** Build the move deck with its guaranteed direction quota. */
+/**
+ * Build the move deck with its guaranteed direction quota.
+ *
+ * The quota is dealt in priority order and truncated to fit, so a short
+ * course keeps the moves that the six-axis guarantee actually depends on and
+ * drops only the surplus. The opening slot is reserved for a straight run-up
+ * and the quota is dealt into the remaining slots — overwriting slot 0 after
+ * the shuffle instead would silently discard whichever quota card landed
+ * there, which a 16-gate deck can absorb and an 8-gate one cannot.
+ */
+const QUOTA = [
+  // What verification requires: two climbs, two dives, a hairpin and a pair
+  // of hard turns to put perpendicular legs on the course.
+  'up', 'up', 'down', 'down', 'reverse', 'left', 'right',
+  // Surplus, for as long as the course has room for it.
+  'up', 'down', 'left', 'right',
+];
+
 function buildDeck(rng, gateCount) {
-  const deck = [
-    'up', 'up', 'up',
-    'down', 'down', 'down',
-    'left', 'left',
-    'right', 'right',
-    'reverse',
-  ];
-  while (deck.length < gateCount) {
-    deck.push(rng.pick(['straight', 'straight', 'left', 'right', 'up', 'down', 'reverse']));
+  const body = QUOTA.slice(0, gateCount - 1);
+  while (body.length < gateCount - 1) {
+    body.push(rng.pick(['straight', 'straight', 'left', 'right', 'up', 'down', 'reverse']));
   }
-  deck.length = gateCount;
-  rng.shuffle(deck);
+  rng.shuffle(body);
+
+  // Open with a clean run-up so the player can settle before the first gate.
+  const deck = ['straight', ...body];
 
   // Smooth out sequences that are unflyable or just unpleasant: back-to-back
   // hairpins, and any run of three identical vertical moves.
@@ -60,8 +94,6 @@ function buildDeck(rng, gateCount) {
       deck[i] = deck[i] === 'straight' ? 'left' : 'straight';
     }
   }
-  // Open with a clean run-up so the player can settle before the first gate.
-  deck[0] = 'straight';
   return deck;
 }
 

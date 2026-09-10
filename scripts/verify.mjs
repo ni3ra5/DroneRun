@@ -11,7 +11,11 @@ import * as THREE from 'three';
 import { DronePhysics } from '../src/drone/DronePhysics.js';
 import { Boost } from '../src/drone/Boost.js';
 import { DroneModel } from '../src/drone/DroneModel.js';
-import { generateTrack } from '../src/world/TrackGenerator.js';
+import {
+  generateTrack, clampGateCount, GATE_CHOICES, MIN_GATES, MAX_GATES,
+} from '../src/world/TrackGenerator.js';
+import { START_SLOTS, startSlot, gridPosition } from '../src/race/Grid.js';
+import { PeerView } from '../src/core/Spectator.js';
 import { CollisionWorld } from '../src/world/CollisionWorld.js';
 import { Race, RaceState } from '../src/race/Race.js';
 
@@ -1055,6 +1059,139 @@ console.log('\n=== FLYABILITY (autopilot through the real physics) ===');
     const avg = times.reduce((s, x) => s + x, 0) / times.length;
     console.log(`      autopilot lap times: avg ${avg.toFixed(1)}s  min ${Math.min(...times).toFixed(1)}s  max ${Math.max(...times).toFixed(1)}s`);
   }
+}
+
+console.log('\n=== COURSE LENGTH ===');
+{
+  ok(clampGateCount(4) === MIN_GATES && clampGateCount(500) === MAX_GATES,
+     'gate count is clamped to the supported range',
+     `4 -> ${clampGateCount(4)}, 500 -> ${clampGateCount(500)}`);
+  ok(clampGateCount('nonsense') === 16, 'a nonsense gate count falls back to the default',
+     String(clampGateCount('nonsense')));
+
+  // Every offered length has to produce exactly that many gates, and has to
+  // do it through verification rather than dropping to the unverified
+  // fallback — a short deck is where the direction quota is easiest to lose.
+  let wrongCount = 0, fellBack = 0, worstUp = 99, worstDown = 99, worstRev = 99;
+  for (const gates of GATE_CHOICES) {
+    for (let i = 0; i < 25; i++) {
+      const t = generateTrack(`len-${gates}-${i}`, gates);
+      if (t.checkpoints.length !== gates) wrongCount++;
+      // buildTrack only stamps `attempt` on a verified track.
+      if (t.attempt === undefined) fellBack++;
+
+      let up = 0, down = 0, rev = 0;
+      const headings = [];
+      for (const cp of t.checkpoints) {
+        if (cp.normal.y > 0.55) up++;
+        if (cp.normal.y < -0.45) down++;
+        const h = new THREE.Vector3(cp.normal.x, 0, cp.normal.z);
+        if (h.lengthSq() > 1e-4) headings.push(h.normalize());
+      }
+      for (let a = 0; a < headings.length; a++) {
+        for (let b = a + 1; b < headings.length; b++) {
+          if (headings[a].dot(headings[b]) < -0.55) rev++;
+        }
+      }
+      worstUp = Math.min(worstUp, up);
+      worstDown = Math.min(worstDown, down);
+      worstRev = Math.min(worstRev, rev);
+    }
+  }
+  ok(wrongCount === 0, 'every offered length builds exactly that many gates',
+     `${GATE_CHOICES.join('/')} over 25 seeds each`);
+  ok(fellBack === 0, 'no offered length has to use the unverified fallback',
+     `${fellBack} fallbacks`);
+  ok(worstUp >= 2 && worstDown >= 2 && worstRev >= 1,
+     'the six-axis guarantee survives the shortest course',
+     `worst case: ${worstUp} climbs, ${worstDown} dives, ${worstRev} reversals`);
+
+  // The shortest course must still be flyable, not merely well-formed.
+  const short = generateTrack('short-fly', MIN_GATES);
+  ok(short.length > 150, 'a short course is still a course', `${short.length.toFixed(0)} m`);
+}
+
+console.log('\n=== STARTING GRID ===');
+{
+  ok(START_SLOTS.length === 8, 'the grid has one square per palette colour',
+     `${START_SLOTS.length} slots`);
+
+  // Two drones on the same square is the bug this replaced, so the squares
+  // have to be far enough apart that nobody starts inside anybody else.
+  let closest = Infinity;
+  for (let i = 0; i < START_SLOTS.length; i++) {
+    for (let j = i + 1; j < START_SLOTS.length; j++) {
+      const a = START_SLOTS[i], b = START_SLOTS[j];
+      closest = Math.min(closest, Math.hypot(a[0] - b[0], a[1] - b[1]));
+    }
+  }
+  // Two 0.36 m radius drones need 0.72 m; anything under a metre would read
+  // as overlapping on screen.
+  ok(closest > 1.2, 'no two grid squares overlap', `closest pair ${closest.toFixed(2)} m`);
+
+  const track = generateTrack('grid-test');
+  const placed = START_SLOTS.map((_, i) => gridPosition(track.start, i));
+  let minSep = Infinity;
+  for (let i = 0; i < placed.length; i++) {
+    for (let j = i + 1; j < placed.length; j++) {
+      minSep = Math.min(minSep, placed[i].distanceTo(placed[j]));
+    }
+  }
+  ok(minSep > 1.2, 'grid squares stay separated once placed on a track',
+     `closest ${minSep.toFixed(2)} m`);
+  ok(placed[0].distanceTo(track.start.position) < 1e-6,
+     'slot 0 is the track start itself');
+
+  // The grid is laid out in the start heading's frame, so it must rotate
+  // with the course rather than always running east-west.
+  const rotated = { position: track.start.position.clone(), yaw: track.start.yaw + Math.PI / 2 };
+  ok(gridPosition(rotated, 1).distanceTo(placed[1]) > 2,
+     'the grid is oriented by the start heading, not by world axes');
+
+  ok(startSlot(-1) === START_SLOTS[7] && startSlot(9) === START_SLOTS[1],
+     'slot lookup wraps in both directions');
+
+  // Every square must be clear of the course's own obstacles, or a player
+  // would spawn inside a building.
+  const collision = new CollisionWorld(track.structures);
+  let blocked = 0;
+  for (const seed of ['grid-a', 'grid-b', 'grid-c', 'grid-d', 'grid-e']) {
+    const t = generateTrack(seed);
+    const world = new CollisionWorld(t.structures);
+    for (let i = 0; i < START_SLOTS.length; i++) {
+      if (world.query(gridPosition(t.start, i), 0.36).length > 0) blocked++;
+    }
+  }
+  ok(blocked === 0, 'no grid square spawns a drone inside geometry',
+     `${blocked} blocked of ${5 * START_SLOTS.length}`);
+  void collision;
+}
+
+console.log('\n=== SPECTATE CAMERA ===');
+{
+  // A peer arrives as an interpolated transform with no velocity, which the
+  // chase camera needs — it leads its look-at point along it. PeerView
+  // differentiates it; check the derived value is right, since a wrong one
+  // points the camera at empty air ahead of the drone.
+  const group = new THREE.Group();
+  group.position.set(0, 20, 0);
+  const view = new PeerView(group);
+  group.position.set(0, 20, -1.5);
+  view.update(0.1);
+  ok(Math.abs(view.velocity.z + 15) < 1e-6, 'a peer view differentiates velocity',
+     `vz=${view.velocity.z.toFixed(3)} m/s`);
+  ok(Math.abs(view.speed - 15) < 1e-6, 'a peer view reports speed');
+
+  group.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), 0.7);
+  ok(Math.abs(view.attitude().yaw - 0.7) < 1e-6,
+     'a peer view reports yaw on the same convention as the physics body',
+     `yaw=${view.attitude().yaw.toFixed(4)}`);
+
+  // A zero delta must not divide by zero and poison the camera with NaN.
+  const before = view.velocity.clone();
+  view.update(0);
+  ok(Number.isFinite(view.velocity.length()) && view.velocity.equals(before),
+     'a zero-length frame leaves the velocity finite and unchanged');
 }
 
 console.log(`\n${fails === 0 ? 'ALL CHECKS PASSED' : `${fails} CHECK(S) FAILED`}\n`);

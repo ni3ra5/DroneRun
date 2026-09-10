@@ -1,6 +1,7 @@
 import './style.css';
 import { Game } from './core/Game.js';
 import { randomSeed } from './core/rng.js';
+import { clampGateCount, DEFAULT_GATES } from './world/TrackGenerator.js';
 import { readSeed, readRoom } from './core/link.js';
 
 function savedTheme() {
@@ -18,6 +19,23 @@ function savedBotCount() {
     return Number.isInteger(n) && n >= 0 && n <= 7 ? n : 0;
   } catch {
     return 0;
+  }
+}
+
+function savedGateCount() {
+  try {
+    const n = Number(localStorage.getItem('dronerun.gates'));
+    return Number.isFinite(n) && n > 0 ? clampGateCount(n) : DEFAULT_GATES;
+  } catch {
+    return DEFAULT_GATES;
+  }
+}
+
+function savedMode() {
+  try {
+    return localStorage.getItem('dronerun.mode') === 'online' ? 'online' : 'solo';
+  } catch {
+    return 'solo';
   }
 }
 
@@ -40,6 +58,8 @@ try {
     seed: readSeed() ?? randomSeed(),
     theme: savedTheme(),
     botCount: savedBotCount(),
+    gateCount: savedGateCount(),
+    mode: savedMode(),
     name: savedName(),
   });
   // An invite link lands straight in the lobby.
