@@ -96,6 +96,18 @@ export class Race {
     this.state = RaceState.IDLE;
     this.currentIndex = 0;
     this.elapsed = 0;
+    /**
+     * Clock for the *field*, as against `elapsed`, which is the player's own
+     * time and stops the moment they cross the line.
+     *
+     * The two have to be separate. A race is not over when the player
+     * finishes — the rest of the field is still out on course, and you can
+     * now sit in their cameras and watch them come home. Bots stamp their
+     * splits from the race clock, so that clock has to keep running; but
+     * running `elapsed` on would overwrite the time on the player's own
+     * results card with however long they then spent spectating.
+     */
+    this.fieldElapsed = 0;
     this.countdown = COUNTDOWN_FROM;
     this.splits = [];
     this.paused = false;
@@ -125,8 +137,15 @@ export class Race {
       if (this.countdown <= 0) {
         this.state = RaceState.RACING;
         this.elapsed = 0;
+        this.fieldElapsed = 0;
       }
       return;
+    }
+
+    // The field's clock runs from GO until the race is reset — including
+    // after the player has finished, while their rivals are still flying.
+    if (this.state === RaceState.RACING || this.state === RaceState.FINISHED) {
+      this.fieldElapsed += dt;
     }
 
     if (this.state !== RaceState.RACING) return;

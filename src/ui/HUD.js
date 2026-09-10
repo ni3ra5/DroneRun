@@ -774,14 +774,14 @@ export class HUD {
         <div class="row">
           <button class="primary" data-restart>Same track</button>
           <button data-new>New track</button>
-          ${canSpectate ? '<button data-watch>Watch the field</button>' : ''}
+          ${canSpectate ? '<button data-watch>Spectate players</button>' : ''}
           <button data-menu>Main menu</button>
         </div>
         ${canSpectate ? `
           <div class="sub-note">
-            Watching puts you in another pilot's chase camera. Step through the
-            field with the arrows or <b>Enter</b>, and <b>Esc</b> brings these
-            results back.
+            Puts you in the chase camera of a pilot who is still racing. Step
+            through them with the arrows or <b>Enter</b>; <b>Esc</b> brings
+            these results back.
           </div>` : ''}
       </div>
     `);

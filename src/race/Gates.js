@@ -4,12 +4,19 @@ import * as THREE from 'three';
  * Checkpoint gate visuals plus the racing-line guide.
  *
  * The gate you have to fly through next is the single most important thing on
- * screen, so it gets three redundant cues: it is the only amber ring, it
- * pulses, and a cone on its axis shows which way through it counts.
+ * screen, so it gets three redundant cues: it is full amber, it pulses, and a
+ * cone on its axis shows which way through it counts.
+ *
+ * The one after it is a pale gold — clearly the same family as the target but
+ * dimmer and not pulsing, so it reads as "and then that one" at a glance.
+ * That matters most at speed: by the time the amber ring fills the screen it
+ * is too late to plan the line into it, and picking the follower out of a
+ * field of identical teal rings took a deliberate look.
  */
 
 const COL_DONE = 0x21405c;
 const COL_NEXT = 0xffc247;
+const COL_SOON = 0xd8c07a;
 const COL_AHEAD = 0x1f7d86;
 const FORWARD_Z = new THREE.Vector3(0, 0, 1);
 
@@ -159,21 +166,32 @@ export class Gates {
     this.legLine.geometry.computeBoundingSphere();
   }
 
+  /** Per-state appearance, so the tiers are defined in one place. */
+  static STATES = {
+    done:  { col: COL_DONE,  emissive: 0.25, film: 0.02,  cone: 0.15, label: 0.25 },
+    next:  { col: COL_NEXT,  emissive: 2.1,  film: 0.12,  cone: 0.9,  label: 1 },
+    soon:  { col: COL_SOON,  emissive: 1.15, film: 0.085, cone: 0.65, label: 0.8 },
+    ahead: { col: COL_AHEAD, emissive: 0.8,  film: 0.055, cone: 0.5,  label: 0.6 },
+  };
+
   /** Recolour gates around the new target. */
   setNext(index) {
     this.nextIndex = index;
     this.gates.forEach((g, i) => {
-      const state = i < index ? 'done' : i === index ? 'next' : 'ahead';
-      const col = state === 'done' ? COL_DONE : state === 'next' ? COL_NEXT : COL_AHEAD;
+      const key = i < index ? 'done'
+        : i === index ? 'next'
+        : i === index + 1 ? 'soon'
+        : 'ahead';
+      const s = Gates.STATES[key];
 
-      g.ringMat.color.setHex(col);
-      g.ringMat.emissive.setHex(col);
-      g.ringMat.emissiveIntensity = state === 'next' ? 2.1 : state === 'done' ? 0.25 : 0.8;
-      g.filmMat.color.setHex(col);
-      g.filmMat.opacity = state === 'next' ? 0.12 : state === 'done' ? 0.02 : 0.055;
-      g.coneMat.color.setHex(col);
-      g.coneMat.opacity = state === 'next' ? 0.9 : state === 'done' ? 0.15 : 0.5;
-      g.label.material.opacity = state === 'done' ? 0.25 : state === 'next' ? 1 : 0.6;
+      g.ringMat.color.setHex(s.col);
+      g.ringMat.emissive.setHex(s.col);
+      g.ringMat.emissiveIntensity = s.emissive;
+      g.filmMat.color.setHex(s.col);
+      g.filmMat.opacity = s.film;
+      g.coneMat.color.setHex(s.col);
+      g.coneMat.opacity = s.cone;
+      g.label.material.opacity = s.label;
 
       // Only the next gate and its successor need to be legible; dimming the
       // rest keeps a 16-gate course from turning into visual soup.

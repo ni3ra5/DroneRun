@@ -104,14 +104,18 @@ html, body {
    Boost is the one resource you spend with your eyes on the gate ahead, so it
    is drawn where the eyes already are rather than in the corner cluster. The
    arc fills from the bottom up. */
+/* Sized so the arc clears the airframe and its props rather than hugging
+   them: the box is centred on the drone and the arc sits at 40% of its width,
+   so a 208px box puts the ring ~83px out. Stroke width is in viewBox units,
+   so it is scaled down to keep the drawn line the same weight as before. */
 #boostring {
-  position: absolute; left: 0; top: 0; width: 132px; height: 132px;
-  margin: -66px 0 0 -66px; will-change: transform; opacity: 0;
+  position: absolute; left: 0; top: 0; width: 208px; height: 208px;
+  margin: -104px 0 0 -104px; will-change: transform; opacity: 0;
   transition: opacity 0.18s linear;
 }
 #boostring svg { width: 100%; height: 100%; overflow: visible; }
 #boostring path {
-  fill: none; stroke-width: 3.4; stroke-linecap: round;
+  fill: none; stroke-width: 2.2; stroke-linecap: round;
   /* Dashed to the full arc length (40π ≈ 125.66) so the fill can be revealed
      by offsetting the dash. */
   stroke-dasharray: 125.664;
@@ -457,6 +461,11 @@ button:disabled:hover { background: rgba(255, 255, 255, 0.05); }
   #hud-alt { display: none; }
   #hud-board { display: none; }
   #hud-compass { transform: translateX(-50%) scale(0.82); transform-origin: top center; }
+  /* The ring is sized to clear the drone, and the drone is drawn smaller on a
+     smaller viewport — so it comes in with it rather than swallowing the
+     frame. */
+  #boostring { width: 158px; height: 158px; margin: -79px 0 0 -79px; }
+  #boostring path { stroke-width: 2.9; }
 }
 
 /* Spectating: the corner instruments all read the player's own drone, so they

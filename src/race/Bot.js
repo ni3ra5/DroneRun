@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 
 import { makeRng } from '../core/rng.js';
-import { DronePhysics } from '../drone/DronePhysics.js';
+import { DronePhysics, stepFixed } from '../drone/DronePhysics.js';
 import { DroneModel } from '../drone/DroneModel.js';
 import { Boost } from '../drone/Boost.js';
 import { crossedGate } from './Race.js';
@@ -107,6 +107,18 @@ export class Bot {
     this._aimOffset = new THREE.Vector3();
     this._fumbling = false;
 
+    /**
+     * This bot's own fixed-step remainder.
+     *
+     * Bots are integrated on exactly the same 240 Hz step as the player, not
+     * once per rendered frame. The attitude controller's gains are only
+     * stable at that step; driven at a variable ~1/60 it rings instead of
+     * settling, which is invisible from behind your own drone and glaringly
+     * obvious the moment a spectate camera sits on a bot. Each bot carries
+     * its own remainder so they do not share a phase.
+     */
+    this._clock = { accum: 0 };
+
     this._prevPos = new THREE.Vector3();
     this._aim = new THREE.Vector3();
     this._to = new THREE.Vector3();
@@ -123,6 +135,7 @@ export class Bot {
 
   reset() {
     this.effects?.clear();
+    if (this._clock) this._clock.accum = 0;
     const s = this.track.start;
     this.body.reset(gridPosition(s, this.startSlot, this._scratch), s.yaw);
     this.boost.reset();
@@ -168,7 +181,7 @@ export class Bot {
       // Hold a hover so a finished bot does not fall out of the sky.
       this._zero();
       this.boost.update(dt, false);
-      this.body.step(dt, this._cmd, collision);
+      stepFixed(this.body, this._clock, dt, this._cmd, collision);
       this.model.update(this.body, dt);
       return;
     }
@@ -176,7 +189,7 @@ export class Bot {
     if (!racing) {
       this._zero();
       this.boost.update(dt, false);
-      this.body.step(dt, this._cmd, collision);
+      stepFixed(this.body, this._clock, dt, this._cmd, collision);
       this.model.update(this.body, dt);
       this._prevPos.copy(this.body.position);
       return;
@@ -187,7 +200,7 @@ export class Bot {
     this._cmd.boost = this.boost.active ? 1 : 0;
 
     this._prevPos.copy(this.body.position);
-    this.body.step(dt, this._cmd, collision);
+    stepFixed(this.body, this._clock, dt, this._cmd, collision);
     this.model.update(this.body, dt);
 
     this._checkGate(raceElapsed);

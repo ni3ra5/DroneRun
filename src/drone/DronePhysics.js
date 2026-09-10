@@ -92,6 +92,44 @@ const ROTORS = [
   { x: -SQRT1_2, z: -SQRT1_2, spin: -1 },
 ];
 
+/**
+ * The integration step, and the cap on how many of them one frame may run.
+ *
+ * These live with the physics rather than with any one caller because they
+ * are a property of the integrator, not of the game loop: the attitude
+ * controller's gains (attitudeKp ~110) are only stable at a step this small,
+ * and anything that advances a body — the player, a bot, a headless test —
+ * has to use the same one or the craft rings instead of settling.
+ */
+export const FIXED_DT = 1 / 240;
+export const MAX_SUBSTEPS = 30;
+
+/**
+ * Advance a body to `dt` in fixed steps, carrying the remainder.
+ *
+ * @param {DronePhysics} body
+ * @param {{accum: number}} clock caller-owned remainder, so each body keeps
+ *        its own phase rather than sharing a global one
+ * @param {number} dt frame delta, seconds
+ * @param {object} cmd control command, held constant across the substeps
+ * @param {?{query: Function}} collision
+ * @returns {number} substeps actually run
+ */
+export function stepFixed(body, clock, dt, cmd, collision) {
+  clock.accum += dt;
+  let steps = 0;
+  while (clock.accum >= FIXED_DT && steps < MAX_SUBSTEPS) {
+    body.step(FIXED_DT, cmd, collision);
+    clock.accum -= FIXED_DT;
+    steps++;
+  }
+  // A backgrounded tab or a stall can hand us a delta worth hundreds of
+  // steps. Drop the backlog rather than spending the next few seconds
+  // catching up in slow motion.
+  if (steps === MAX_SUBSTEPS) clock.accum = 0;
+  return steps;
+}
+
 export class DronePhysics {
   constructor(tuning = {}) {
     this.t = { ...TUNING, ...tuning };

@@ -8,13 +8,15 @@
  * rather than only checking that they were generated.
  */
 import * as THREE from 'three';
-import { DronePhysics } from '../src/drone/DronePhysics.js';
+import { DronePhysics, FIXED_DT, MAX_SUBSTEPS, stepFixed } from '../src/drone/DronePhysics.js';
 import { Boost } from '../src/drone/Boost.js';
 import { DroneModel } from '../src/drone/DroneModel.js';
 import {
   generateTrack, clampGateCount, GATE_CHOICES, MIN_GATES, MAX_GATES,
 } from '../src/world/TrackGenerator.js';
 import { START_SLOTS, startSlot, gridPosition } from '../src/race/Grid.js';
+import { Gates } from '../src/race/Gates.js';
+import { CameraRig } from '../src/core/CameraRig.js';
 import { PeerView } from '../src/core/Spectator.js';
 import { CollisionWorld } from '../src/world/CollisionWorld.js';
 import { Race, RaceState } from '../src/race/Race.js';
@@ -1192,6 +1194,137 @@ console.log('\n=== SPECTATE CAMERA ===');
   view.update(0);
   ok(Number.isFinite(view.velocity.length()) && view.velocity.equals(before),
      'a zero-length frame leaves the velocity finite and unchanged');
+}
+
+console.log('\n=== FIXED STEP ===');
+{
+  // The point of stepFixed is that a body behaves the same regardless of how
+  // often the caller gets round to it. Bots used to be stepped once per
+  // rendered frame, so their flying quietly depended on the frame rate — and
+  // every bot test in this file runs at 1/240, which is not what the game
+  // does. Same command, same duration, three frame rates.
+  const drive = (dt, useFixed) => {
+    const b = new DronePhysics();
+    b.reset(new THREE.Vector3(0, 40, 0), 0);
+    const clock = { accum: 0 };
+    const cmd = { forward: 0, right: 0, yaw: 0, vertical: 0, boost: 0 };
+    const n = Math.round(4 / dt);
+    for (let i = 0; i < n; i++) {
+      const t = i * dt;
+      cmd.forward = 0.8;
+      cmd.right = Math.sin(t * 5.5) * 0.9;
+      cmd.yaw = Math.sin(t * 3.1) * 0.7;
+      if (useFixed) stepFixed(b, clock, dt, cmd, null);
+      else b.step(dt, cmd, null);
+    }
+    return b.position.clone();
+  };
+
+  const ref = drive(FIXED_DT, true);
+  const fixedSpread = Math.max(
+    ...[1 / 30, 1 / 60, 1 / 120].map((dt) => drive(dt, true).distanceTo(ref)),
+  );
+  const rawSpread = Math.max(
+    ...[1 / 30, 1 / 60, 1 / 120].map((dt) => drive(dt, false).distanceTo(ref)),
+  );
+  ok(fixedSpread < 0.5, 'the fixed step makes a body frame-rate independent',
+     `${fixedSpread.toFixed(3)} m spread across 30/60/120 fps over a 4 s weave`);
+  // Deliberately loose: the point is the order-of-magnitude difference, not a
+  // precise ratio that would flake on a different three.js release.
+  ok(rawSpread > fixedSpread * 2.5, 'stepping once per frame does not',
+     `${rawSpread.toFixed(2)} m spread — ${(rawSpread / fixedSpread).toFixed(1)}x worse`);
+
+  // A stalled tab hands back a huge delta. It must not spend the next
+  // several seconds catching up in slow motion.
+  const b = new DronePhysics();
+  b.reset(new THREE.Vector3(0, 40, 0), 0);
+  const clock = { accum: 0 };
+  const steps = stepFixed(b, clock, 5, ZERO, null);
+  ok(steps === MAX_SUBSTEPS && clock.accum === 0,
+     'a huge frame delta is capped and its backlog dropped',
+     `${steps} steps, ${clock.accum} s left over`);
+}
+
+console.log('\n=== SPECTATE CAMERA SMOOTHING ===');
+{
+  // A bot weaves far harder than a human does, and the chase camera derives
+  // its whole pose from the subject's heading — so a camera tuned for "you
+  // are the one steering" shakes when bolted to somebody else. Measure the
+  // camera's own aim, not the drone's.
+  const { Bot } = await import('../src/race/Bot.js');
+  const track = generateTrack('shake-probe');
+  const collision = new CollisionWorld(track.structures);
+  const scene = new THREE.Group();   // Bot only needs somewhere to add a model
+
+  const measure = (spectate) => {
+    const bot = new Bot({ scene, track, collision, index: 0, count: 1, color: 0x35e6d0 });
+    const cam = new THREE.PerspectiveCamera(62, 16 / 9, 0.1, 2400);
+    const rig = new CameraRig(cam);
+    rig.reset(bot.body, { spectate });
+    const dt = 1 / 60;
+    const fwd = new THREE.Vector3();
+    let prevFwd = null, prevRate = null, sum = 0, n = 0, worst = 0;
+    for (let i = 0; i < 60 * 25; i++) {
+      bot.update(dt, i * dt, true);
+      rig.update(bot.body, dt, collision, { spectate });
+      cam.getWorldDirection(fwd);
+      if (prevFwd) {
+        const rate = prevFwd.angleTo(fwd) / dt;
+        if (prevRate !== null && i > 120) {
+          const jerk = Math.abs(rate - prevRate);
+          sum += jerk; n++; worst = Math.max(worst, jerk);
+        }
+        prevRate = rate;
+      }
+      prevFwd = prevFwd ? prevFwd.copy(fwd) : fwd.clone();
+    }
+    bot.dispose();
+    return { avg: (sum / n) * 57.3, worst: worst * 57.3 };
+  };
+
+  const own = measure(false);
+  const spec = measure(true);
+  ok(spec.avg < own.avg * 0.7, 'the spectate camera is steadier than the chase camera',
+     `aim jerk ${spec.avg.toFixed(1)} vs ${own.avg.toFixed(1)} deg/s^2`);
+  ok(spec.worst < own.worst * 0.6, 'and its worst jolt is much smaller',
+     `${spec.worst.toFixed(1)} vs ${own.worst.toFixed(1)} deg/s^2`);
+
+  // Yaw damping has to take the short way round. A course doubles back on
+  // itself constantly, so a subject crossing +/-pi is routine — and going the
+  // long way is a full 360 degree whip of the camera.
+  const rig = new CameraRig(new THREE.PerspectiveCamera());
+  const near = rig._damp(Math.PI - 0.05, -Math.PI + 0.05, 3.4, 1 / 60);
+  // Damping toward a target 0.1 rad away the short way keeps us near +pi;
+  // the long way round would drag the value toward zero.
+  ok(Math.abs(near) > Math.PI - 0.1, 'yaw damping wraps the short way across +/-pi',
+     `${(Math.PI - 0.05).toFixed(3)} -> ${near.toFixed(3)} rad`);
+
+  const half = rig._damp(0, 1, 1e9, 1 / 60);
+  ok(Math.abs(half - 1) < 1e-6, 'a very high rate converges immediately');
+}
+
+console.log('\n=== GATE HIGHLIGHT TIERS ===');
+{
+  const S = Gates.STATES;
+  ok(S.next && S.soon && S.ahead && S.done, 'there are four gate tiers');
+
+  const warmth = (hex) => {
+    const r = (hex >> 16) & 255, g = (hex >> 8) & 255, b = hex & 255;
+    return (r + g) / 2 - b;      // >0 is warm, <0 is cool
+  };
+  ok(warmth(S.next.col) > 60, 'the target gate is warm', `${warmth(S.next.col).toFixed(0)}`);
+  ok(warmth(S.soon.col) > 60, 'the gate after it is warm too — the look-ahead cue',
+     `${warmth(S.soon.col).toFixed(0)}`);
+  ok(warmth(S.ahead.col) < 0, 'gates further out stay cool, so the pair stands apart',
+     `${warmth(S.ahead.col).toFixed(0)}`);
+  ok(S.soon.col !== S.next.col, 'the look-ahead gate is not confusable with the target');
+  // It has to read as secondary, or the player has two things claiming to be
+  // the gate to aim at.
+  ok(S.soon.emissive < S.next.emissive && S.soon.film < S.next.film
+     && S.soon.cone < S.next.cone && S.soon.label < S.next.label,
+     'and is dimmer than the target on every cue',
+     `emissive ${S.soon.emissive} vs ${S.next.emissive}`);
+  ok(S.soon.emissive > S.ahead.emissive, 'but brighter than the gates beyond it');
 }
 
 console.log(`\n${fails === 0 ? 'ALL CHECKS PASSED' : `${fails} CHECK(S) FAILED`}\n`);

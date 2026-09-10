@@ -14,10 +14,30 @@ import * as THREE from 'three';
 const CHASE_OFFSET = new THREE.Vector3(0, 1.4, 4.7);
 const UP = new THREE.Vector3(0, 1, 0);
 
+/**
+ * Response rates, per subject.
+ *
+ * Flying your own drone, the camera should feel welded on — you are the one
+ * commanding the heading, so tracking it immediately reads as control rather
+ * than as jitter. Spectating, the opposite: you did not ask for any of those
+ * inputs, and two things make a followed craft's pose noisy in a way your own
+ * never is. A bot corners with hard, oscillating yaw commands; and a network
+ * peer's transform is interpolated between 20 Hz snapshots, so its
+ * differentiated velocity is a step function. Following either one tightly
+ * puts that noise straight into the frame, so the spectate camera trades
+ * responsiveness for a steady horizon — including damping the subject's
+ * heading itself, which the chase offset is built from.
+ */
+const RESPONSE = {
+  own:      { pos: 9,   look: 13,  yaw: null, lead: 0.12 },
+  spectate: { pos: 4.5, look: 6.5, yaw: 3.4,  lead: 0.05 },
+};
+
 export class CameraRig {
   constructor(camera) {
     this.camera = camera;
     this.baseFov = 62;
+    this._yaw = 0;
 
     this._pos = new THREE.Vector3();
     this._look = new THREE.Vector3();
@@ -28,20 +48,47 @@ export class CameraRig {
     this._initialised = false;
   }
 
-  /** Snap straight to the ideal pose, e.g. after a restart. */
-  reset(body) {
+  /**
+   * Snap straight to the ideal pose, e.g. after a restart or when cutting to
+   * another pilot's camera.
+   */
+  reset(body, opts = {}) {
     this._initialised = false;
-    this.update(body, 1 / 60, null);
+    this.update(body, 1 / 60, null, opts);
+  }
+
+  /**
+   * Follow an angle the short way round.
+   *
+   * Damping raw yaw would send the camera the long way round every time the
+   * subject crosses ±π, which on a course that doubles back on itself is
+   * often — so the error is wrapped into (-π, π] before it is applied.
+   */
+  _damp(current, target, rate, dt) {
+    let d = target - current;
+    while (d > Math.PI) d -= Math.PI * 2;
+    while (d < -Math.PI) d += Math.PI * 2;
+    return current + d * (1 - Math.exp(-rate * dt));
   }
 
   /**
    * @param {import('../drone/DronePhysics.js').DronePhysics} body
    * @param {number} dt
    * @param {?import('../world/CollisionWorld.js').CollisionWorld} collision
+   * @param {{spectate?: boolean}} opts following someone else's drone rather
+   *        than the player's own, which needs a gentler response — see
+   *        RESPONSE above
    */
-  update(body, dt, collision) {
+  update(body, dt, collision, opts = {}) {
+    const k = opts.spectate ? RESPONSE.spectate : RESPONSE.own;
     const { yaw } = body.attitude();
-    this._yawQuat.setFromAxisAngle(UP, yaw);
+
+    // Own drone: take the heading raw, so the camera is welded to it.
+    // Spectating: damp it, so a bot's cornering does not swing the camera
+    // around the craft.
+    if (!this._initialised || k.yaw == null) this._yaw = yaw;
+    else this._yaw = this._damp(this._yaw, yaw, k.yaw, dt);
+    this._yawQuat.setFromAxisAngle(UP, this._yaw);
 
     this._desired.copy(CHASE_OFFSET).applyQuaternion(this._yawQuat).add(body.position);
 
@@ -49,15 +96,15 @@ export class CameraRig {
     // ahead instead of burying the horizon.
     this._desiredLook.copy(body.position)
       .addScaledVector(this._tmp.set(0, 0, -1).applyQuaternion(this._yawQuat), 4.5)
-      .addScaledVector(body.velocity, 0.12);
+      .addScaledVector(body.velocity, k.lead);
 
     if (!this._initialised) {
       this._pos.copy(this._desired);
       this._look.copy(this._desiredLook);
       this._initialised = true;
     } else {
-      this._pos.lerp(this._desired, 1 - Math.exp(-9 * dt));
-      this._look.lerp(this._desiredLook, 1 - Math.exp(-13 * dt));
+      this._pos.lerp(this._desired, 1 - Math.exp(-k.pos * dt));
+      this._look.lerp(this._desiredLook, 1 - Math.exp(-k.look * dt));
     }
 
     if (collision) this._avoidGeometry(collision, body.position);

@@ -6,7 +6,7 @@ import { PeerView } from './Spectator.js';
 import { randomSeed, randomPilotName } from './rng.js';
 import { readSeed, writeSeed, readRoom, writeRoom, inviteUrl } from './link.js';
 
-import { DronePhysics } from '../drone/DronePhysics.js';
+import { DronePhysics, stepFixed } from '../drone/DronePhysics.js';
 import { DroneModel, PLAYER_COLORS } from '../drone/DroneModel.js';
 import { Boost } from '../drone/Boost.js';
 import { BoostEffect } from '../drone/BoostEffect.js';
@@ -40,9 +40,9 @@ import { CloudflareAdapter, makeRoomCode } from '../net/CloudflareAdapter.js';
  * Physics runs on a fixed 240 Hz step, decoupled from the render rate. A
  * flight controller with gains this stiff is not stable at a variable 60 Hz
  * step, and a fixed step is also what makes replays and multiplayer agree.
+ * The step itself lives in the physics module, so that every body in the
+ * world — the player's and every bot's — is integrated identically.
  */
-const FIXED_DT = 1 / 240;
-const MAX_SUBSTEPS = 30;
 
 const SOFT_BOUND = 520;   // metres from origin: warn
 const HARD_BOUND = 820;   // metres from origin: return to last gate
@@ -139,7 +139,7 @@ export class Game {
     this._sendAccum = 0;
 
     this._prevPos = new THREE.Vector3();
-    this._accum = 0;
+    this._clock = { accum: 0 };
     this._lastFrame = performance.now();
     this._cmd = { forward: 0, right: 0, yaw: 0, vertical: 0, boost: 0 };
     this._boostVisual = false;
@@ -280,6 +280,10 @@ export class Game {
     this.collision = new CollisionWorld(this.track.structures);
     this.structures = new Structures(this.scene, this.track.structures, this.theme);
     this.gates = new Gates(this.scene, this.track);
+    // A fresh Gates highlights gate 0 in its constructor, so the cached
+    // index has to start there too or the first _highlightGate(0) no-ops
+    // against a stale value from the previous track.
+    this._gateHighlight = 0;
 
     this.race = new Race(this.track);
     this.race.onGate = (index, split, delta) => this._onGate(index, split, delta);
@@ -582,7 +586,7 @@ export class Game {
     adapter.on('lobby', () => {
       this.race.reset();
       this._resetDrone();
-      this.gates.setNext(0);
+      this._highlightGate(0);
       this.music.pause();
       this._renderLobby();
     });
@@ -671,7 +675,7 @@ export class Game {
     this.setGateCount(this._preferredGates, { remember: false, reload: false });
     this.race.reset();
     this.loadTrack(this.seed);
-    this.gates.setNext(0);
+    this._highlightGate(0);
     this.showStart();
   }
 
@@ -688,7 +692,7 @@ export class Game {
       // request rather than a local decision.
       this.race.reset();
       this._resetDrone();
-      this.gates.setNext(0);
+      this._highlightGate(0);
       this.music.pause();
       if (this.online.isHost) this.online.returnToLobby();
       this._renderLobby();
@@ -697,7 +701,7 @@ export class Game {
     this.race.paused = false;
     this.race.reset();
     this._resetDrone();
-    this.gates.setNext(0);
+    this._highlightGate(0);
     this.showStart();
   }
 
@@ -755,7 +759,7 @@ export class Game {
       Object.assign(p, { gate: 0, splits: [], finished: false, finishTime: null });
     }
     this.race.begin();
-    this.gates.setNext(0);
+    this._highlightGate(0);
     // A round always starts from a click or a keypress, so this call sits
     // inside a user gesture and the autoplay policy lets it through.
     this.music.start();
@@ -912,14 +916,22 @@ export class Game {
   // ── spectating ─────────────────────────────────────────────────────────
 
   /**
-   * Everyone whose drone can be watched: the bot field solo, the other
-   * pilots online. Rebuilt on demand rather than cached, because a peer can
-   * leave the room mid-race and a cached list would keep a disposed drone in
-   * the carousel.
+   * Everyone whose drone is worth watching: the bot field solo, the other
+   * pilots online — and only those **still flying**.
+   *
+   * A pilot who has already finished is parked in a hover somewhere off the
+   * course, so putting a camera on them shows nothing happening. Filtering
+   * here rather than at the call sites means the carousel, the bar's "n of m"
+   * and whether the results card offers to spectate at all are all driven by
+   * the same definition, and cannot disagree.
+   *
+   * Rebuilt on demand rather than cached: a peer can leave the room mid-race,
+   * and a cached list would keep a disposed drone in the carousel.
    */
   _spectateTargets() {
     const out = [];
     for (const bot of this.bots) {
+      if (bot.finished) continue;
       out.push({
         id: bot.id,
         name: bot.name,
@@ -931,6 +943,7 @@ export class Game {
     }
     for (const [id, peer] of this.fleet.peers) {
       const p = this._peerProgress(id);
+      if (p.finished) continue;
       out.push({
         id,
         name: peer.name ?? 'Pilot',
@@ -975,7 +988,7 @@ export class Game {
     this.hud.hideModal();
     this._refreshSpectateBar();
     // Cutting between cameras should cut, not fly the camera across the map.
-    this.rig.reset(this._cameraSubject(0));
+    this.rig.reset(this._cameraSubject(0), { spectate: true });
   }
 
   stopSpectating() {
@@ -983,6 +996,8 @@ export class Game {
     this._spectating = null;
     this._peerView = null;
     this.hud.setSpectate(null);
+    // Hand the ring highlight back to our own progress.
+    this._highlightGate(this.race.currentIndex);
     this.rig.reset(this.body);
     // Back to whatever screen we left to go and watch.
     if (this.race.state === RaceState.FINISHED && this._finishCard) {
@@ -990,13 +1005,35 @@ export class Game {
     }
   }
 
-  /** Keep the bar's gate and status honest while the field is still flying. */
+  /**
+   * Keep the bar's gate and status honest while the field is still flying,
+   * and follow the field as it thins out.
+   *
+   * Whoever we are watching will eventually cross the line and drop out of
+   * the carousel. Cutting straight back to a results card in that moment
+   * would be abrupt and would strand the viewer as soon as the leader
+   * finished, so the camera moves to somebody else who is still racing and
+   * only returns to the results when the last pilot is home.
+   */
   _refreshSpectateBar() {
     if (this._spectating == null) return;
     const targets = this._spectateTargets();
     const at = targets.findIndex((t) => t.id === this._spectating);
-    if (at < 0) { this.stopSpectating(); return; }
+    if (at < 0) {
+      if (targets.length > 0) {
+        this.hud.toast('Pilot finished — following the next', '#ffc247');
+        this._setSpectate(targets[0].id);
+        return;
+      }
+      this.hud.toast('Everyone has finished', '#35e6d0');
+      this.stopSpectating();
+      return;
+    }
     const t = targets[at];
+    // The rings are laid out for the *player's* progress, and the player has
+    // finished — which leaves every ring culled. Retarget the highlight onto
+    // whoever we are watching so the course reads as theirs.
+    this._highlightGate(t.gate);
     this.hud.setSpectate({
       name: t.name,
       color: t.color,
@@ -1009,22 +1046,36 @@ export class Game {
   }
 
   /**
+   * Point the gate highlight at an index, if it is not already there.
+   *
+   * setNext walks every gate and rewrites four materials, so it is guarded:
+   * this is called several times a second while spectating and the index
+   * only changes when somebody passes a gate.
+   */
+  _highlightGate(index) {
+    if (this._gateHighlight === index) return;
+    this._gateHighlight = index;
+    this.gates?.setNext(index);
+  }
+
+  /**
    * What the chase camera is following this frame.
    * @param {number} dt used to differentiate a peer's velocity
    */
   _cameraSubject(dt) {
     if (this._spectating == null) return this.body;
     const target = this._spectateTargets().find((t) => t.id === this._spectating);
-    if (!target) {
-      // Whoever we were watching has gone. Fall back rather than freeze.
-      this._spectating = null;
-      this._peerView = null;
-      this.hud.setSpectate(null);
-      return this.body;
-    }
+    // Whoever we were watching has finished or left. Hold on our own drone
+    // for this frame; _refreshSpectateBar decides within ~125 ms whether to
+    // follow somebody else or go back to the results, and clearing the
+    // target here would pre-empt that choice.
+    if (!target) return this.body;
     if (target.body) return target.body;
     return this._peerView ? this._peerView.update(dt) : this.body;
   }
+
+  /** True while the camera is on somebody else's drone. */
+  get _isSpectating() { return this._spectating != null; }
 
   /** Recover from being wedged in geometry or lost off the map. */
   respawn() {
@@ -1055,7 +1106,7 @@ export class Game {
   }
 
   _onGate(index, split, delta) {
-    this.gates.setNext(index + 1);
+    this._highlightGate(index + 1);
     this.hud.showDelta(delta);
     if (index + 1 < this.race.total) this.hud.toast(`Gate ${index + 1} clear`);
     this.net.sendEvent('gate', { index, split });
@@ -1168,24 +1219,25 @@ export class Game {
     const worldDt = dt * scale;
     const collision = this.effects.collisionOff ? null : this.collision;
 
-    this._accum += worldDt;
-    let steps = 0;
-    while (this._accum >= FIXED_DT && steps < MAX_SUBSTEPS) {
-      this.body.step(FIXED_DT, cmd, collision);
-      this._accum -= FIXED_DT;
-      steps++;
-    }
-    if (steps === MAX_SUBSTEPS) this._accum = 0;   // drop the backlog
+    stepFixed(this.body, this._clock, worldDt, cmd, collision);
 
     // Gate validation uses the whole frame's travel, so a gate can never be
     // tunnelled through no matter how fast the drone is moving.
     this.race.update(worldDt, this._prevPos, this.body.position);
 
-    // Bots run the same physics on the same fixed frame delta, and their
-    // splits are stamped from the shared race clock so standings compare
-    // like with like.
+    // Bots run the same physics on the same fixed step, and their splits are
+    // stamped from the shared race clock so standings compare like with like.
+    //
+    // The field keeps racing after the player crosses the line. It has to:
+    // they still have a race to finish, the standings are not settled until
+    // they do, and the spectate cameras would otherwise show a row of drones
+    // hovering in mid-air. `fieldElapsed` is the clock that keeps running
+    // where the player's own `elapsed` has stopped.
     const racing = this.race.state === RaceState.RACING;
-    for (const bot of this.bots) bot.update(worldDt, this.race.elapsed, racing);
+    const fieldRacing = racing || this.race.state === RaceState.FINISHED;
+    for (const bot of this.bots) {
+      bot.update(worldDt, this.race.fieldElapsed, fieldRacing);
+    }
 
     // Pickups and projectiles share the dilated clock so a slowed world
     // slows everything in it, not just the drone.
@@ -1205,7 +1257,8 @@ export class Game {
     this.music.update(dt);
     this.gates.update(dt);
     this.fleet.update(dt);
-    this.rig.update(this._cameraSubject(dt), dt, this.collision);
+    this.rig.update(this._cameraSubject(dt), dt, this.collision,
+      { spectate: this._isSpectating });
     this.environment.update(this.body.position);
 
     this._enforceBounds();
