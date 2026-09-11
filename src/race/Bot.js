@@ -59,10 +59,27 @@ function skillFor(index, count) {
   // still contains a fast one and a slow one.
   const t = count > 1 ? index / (count - 1) : 0.5;
   return {
-    cruise: THREE.MathUtils.lerp(13.2, 9.4, t),      // m/s target speed
+    // These are a control loop wrapped around the flight model, so they are
+    // only correct relative to it. When the airframe's envelope was widened
+    // — 1.8x the lateral acceleration, 1.5x the yaw rate — this loop's gain
+    // went up by the same factors without a line of it changing, and the
+    // field went from finishing every course to finishing one in thirty:
+    // bots wobbled down the straights and swung past every gate. `gain` and
+    // `yawGain` divide that back out; `cruise` then spends the handling the
+    // craft actually gained. Measured across four courses of five bots,
+    // before and after: 18% of gates reached -> 100%, average lap 128 s -> 76 s.
+    // 15.2 is a ceiling, not a preference. Above it the leading bot arrives
+    // at hard corners faster than the airframe can bend its own path, misses,
+    // comes round, and on one course in six never gets through at all —
+    // while finishing no quicker for it (75.3 s average at 17.7, 74.8 s at
+    // 15.2). A bot that brakes for corners could carry more down the
+    // straights; this one does not, so its cruise is set by its worst corner.
+    cruise: THREE.MathUtils.lerp(15.2, 12.6, t),     // m/s target speed
     lineupBack: THREE.MathUtils.lerp(13, 17, t),     // staging distance
     commitLead: THREE.MathUtils.lerp(16, 12, t),
-    gain: THREE.MathUtils.lerp(4.4, 5.6, t),         // velocity error -> stick
+    gain: THREE.MathUtils.lerp(9.7, 12.3, t),        // velocity error -> stick
+    yawGain: 1.1,                                    // heading error -> yaw stick
+    vertGain: 3,                                     // climb error -> vertical stick
     usesBoost: t < 0.7,
     // Chance of fumbling any given gate, and how sloppy a clean approach is.
     missChance: THREE.MathUtils.lerp(0.03, 0.13, t),
@@ -266,10 +283,10 @@ export class Bot {
     this._local.copy(this._want).applyQuaternion(this._q);
 
     const c = this._cmd;
-    c.yaw = THREE.MathUtils.clamp(yawErr * 2, -1, 1);
+    c.yaw = THREE.MathUtils.clamp(yawErr * s.yawGain, -1, 1);
     c.forward = THREE.MathUtils.clamp(-this._local.z / s.gain, -1, 1);
     c.right = THREE.MathUtils.clamp(this._local.x / s.gain, -1, 1);
-    c.vertical = THREE.MathUtils.clamp(this._want.y / 3, -1, 1);
+    c.vertical = THREE.MathUtils.clamp(this._want.y / s.vertGain, -1, 1);
 
     // Boost down long straights, once lined up — not into a corner.
     const aligned = Math.abs(yawErr) < 0.35;

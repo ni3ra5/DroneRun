@@ -31,21 +31,41 @@ export const TUNING = {
   inertia: [0.021, 0.036, 0.021], // kg·m² about body X (pitch), Y (yaw), Z (roll)
 
   maxRotorThrust: 8.4,        // N each -> thrust-to-weight ≈ 3.0
-  motorTau: 0.045,            // s, spool-up time constant
+  motorTau: 0.030,            // s, spool-up time constant
   yawTorqueCoeff: 0.055,      // N·m of reaction torque per N of thrust
 
   // Outer loop authority.
-  maxTilt: THREE.MathUtils.degToRad(38),
+  //
+  // Lean angle IS cornering power: the only horizontal force a quadcopter has
+  // is its own thrust vector tipped over, so the whole turn-and-stop envelope
+  // is g*tan(maxTilt). At 38° that was 7.6 m/s², which made a 90° change of
+  // direction at 15 m/s take 6.4 seconds — longer than the gap between two
+  // gates, so the corner simply could not be made. 54° gives 13.5 m/s² and
+  // brings that to 2.8 s. Racing quads fly far steeper than this; 54° is
+  // still a conservative angle for the airframe, and the limit here is the
+  // player's ability to read the horizon, not the physics.
+  maxTilt: THREE.MathUtils.degToRad(54),
   // Boost multipliers. Tilt and thrust have to rise together: leaning harder
   // is what produces the extra horizontal acceleration, and holding altitude
   // at a steeper lean costs more thrust (mg / cos θ). Raising tilt alone
   // would just make the drone sink while it accelerated.
-  // Boost widens the envelope: 38° -> 63° of lean roughly doubles both
-  // acceleration and top speed (21 -> 47 km/h at one second, 57 -> 120 km/h
-  // flat out), and the thrust multiplier keeps it able to hold altitude there.
-  boostTilt: 1.65,
-  boostThrust: 2.3,           // enough headroom to hold height at that lean
-  maxYawRate: 2.6,            // rad/s
+  //
+  // 54° -> 69°, chosen to preserve the boost that was already tuned: the old
+  // craft's boost topped out at 121 km/h and cost 2.6 m of altitude per full
+  // reserve, and this gives 119 km/h for 2.5 m — the same burst, now on top
+  // of a much stronger base craft.
+  //
+  // The thrust multiplier is what buys that lean, and it is not decoration.
+  // At this angle nearly all of the airspeed lies along the body-Y axis, and
+  // the drag it generates is within a few newtons of everything four rotors
+  // can produce; leaving the multiplier where it was simply saturated them,
+  // and the craft mushed downward instead of accelerating. Measured
+  // altitude cost per reserve against lean: 1.7 m at 67°, 2.5 m at 69°,
+  // 3.0 m at 70°, 6.4 m at 71° — the curve turns sharply upward right past
+  // here, so this is the edge of the envelope rather than a point on it.
+  boostTilt: 1.28,
+  boostThrust: 2.5,           // enough headroom to hold height at that lean
+  maxYawRate: 3.8,            // rad/s — 180° in 0.9 s
   maxClimbRate: 6.5,          // m/s
   climbKp: 3.2,               // (m/s²) per (m/s) of climb-rate error
   climbKi: 2.4,               // integral term — see the note in step()
@@ -56,9 +76,15 @@ export const TUNING = {
   climbIClamp: 9,
 
   // Inner loop: gains are in angular-acceleration terms (rad/s² per rad).
-  // ωn ≈ 10.5 rad/s, ζ ≈ 0.76 — snappy but without overshoot ringing.
-  attitudeKp: 110,
-  attitudeKd: 16,
+  // ωn ≈ 15.2 rad/s, ζ ≈ 0.73 — 0.17 s to reach 90% of a commanded lean,
+  // against 0.25 s before. This is the half of "heavy" that is not about
+  // momentum at all: until the airframe has rotated, the stick has produced
+  // no force whatsoever, so attitude lag is felt as dead travel on the
+  // controls. Note the gains are multiplied by inertia in step(), so the
+  // closed-loop response is independent of the inertia tensor — raising
+  // these, not lowering inertia, is what makes the craft answer faster.
+  attitudeKp: 230,
+  attitudeKd: 22,
 
   // Aerodynamics. Quadratic drag is per body axis: a quad has more drag
   // across the rotor disc than along its flight direction.
@@ -69,8 +95,18 @@ export const TUNING = {
   // aggressive coefficient here does not model a diving drone, it models a
   // craft that cannot hold altitude while accelerating. Descent rate is
   // regulated by the climb controller, not by this term.
-  dragQuad: [0.045, 0.06, 0.032],
-  dragLinear: 0.16,
+  //
+  // These were raised along with the lean angle, and the two together are
+  // what fixed cornering. Tilt alone did not: with the old drag the craft
+  // kept accelerating through a turn, and a wider turn at a higher speed took
+  // just as long. Worse, it left a cliff — at one entry speed the turn took
+  // 2.9 s and a fraction faster it took 4.4 s, because near its top speed the
+  // craft could no longer generate enough sideways force to bend its own
+  // path. With drag raised to match, turn time is flat at 2.7-2.8 s across
+  // the entire speed range, which is the difference between a craft that
+  // handles predictably and one that sometimes just will not turn.
+  dragQuad: [0.065, 0.062, 0.050],
+  dragLinear: 0.30,
   angularDrag: 0.035,
 
   // Collision.

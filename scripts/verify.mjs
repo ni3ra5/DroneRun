@@ -154,8 +154,16 @@ console.log('\n=== BOOST ===');
   run(boosted, { forward: 1, right: 0, yaw: 0, vertical: 0, boost: 1 }, 8);
   const vBoost = Math.hypot(boosted.velocity.x, boosted.velocity.z);
 
-  ok(vBoost > vPlain * 1.8, 'boost roughly doubles top speed',
-     `${(vPlain * 3.6).toFixed(0)} -> ${(vBoost * 3.6).toFixed(0)} km/h (+${((vBoost / vPlain - 1) * 100).toFixed(0)}%)`);
+  // Measured in absolute terms, not as a ratio against the unboosted craft.
+  // A ratio silently re-specifies boost every time the base airframe is
+  // retuned: widening the flight envelope made this ratio fail while boost
+  // itself was untouched and still reached the same speed it always had.
+  // What a player actually feels is how fast boost goes and how much it
+  // adds, so those are the numbers pinned here.
+  ok(vBoost * 3.6 > 110 && (vBoost - vPlain) * 3.6 > 45,
+     'boost opens up a large stretch of extra speed',
+     `${(vPlain * 3.6).toFixed(0)} -> ${(vBoost * 3.6).toFixed(0)} km/h ` +
+     `(+${((vBoost - vPlain) * 3.6).toFixed(0)} km/h)`);
 
   // Convergence under sustained boost is asserted further down, over a
   // 12-second horizon: leaning to 63° puts a lot of airspeed on the body's
@@ -176,8 +184,9 @@ console.log('\n=== BOOST ===');
   run(a1, { forward: 1, right: 0, yaw: 0, vertical: 0, boost: 0 }, 1.5);
   const a2 = new DronePhysics(); a2.reset(new THREE.Vector3(0, 40, 0), 0);
   run(a2, { forward: 1, right: 0, yaw: 0, vertical: 0, boost: 1 }, 1.5);
-  ok(a2.speed > a1.speed * 1.7, 'boost accelerates far harder off the mark',
-     `${a1.speed.toFixed(1)} -> ${a2.speed.toFixed(1)} m/s after 1.5 s`);
+  ok(a2.speed > 19 && a2.speed - a1.speed > 7, 'boost accelerates far harder off the mark',
+     `${a1.speed.toFixed(1)} -> ${a2.speed.toFixed(1)} m/s after 1.5 s ` +
+     `(+${(a2.speed - a1.speed).toFixed(1)})`);
 
   // The vertical integrator's clamp, not thrust, is what decides whether the
   // craft can hold height at full boost lean — the controller can only ask
@@ -1029,12 +1038,19 @@ console.log('\n=== FLYABILITY (autopilot through the real physics) ===');
       // Velocity control, not position control: a proportional controller on
       // position alone has no damping term and just orbits the target.
       const dist = to.length();
-      want.copy(to).normalize().multiplyScalar(Math.min(11, dist * 0.85)).sub(body.velocity);
+      want.copy(to).normalize().multiplyScalar(Math.min(14, dist * 0.85)).sub(body.velocity);
       const local = want.clone().applyQuaternion(q);
 
-      cmd.yaw = Math.max(-1, Math.min(1, yawErr * 2.0));
-      cmd.forward = Math.max(-1, Math.min(1, -local.z / 5));
-      cmd.right = Math.max(-1, Math.min(1, local.x / 5));
+      // These gains are relative to the airframe, not absolute. Widening the
+      // flight envelope multiplies this loop's gain by the same factor
+      // without touching a line of it, and an overdriven pursuit loop swings
+      // past every gate instead of flying through it — this autopilot went
+      // from finishing 15 courses out of 15 to none at all on that change
+      // alone. Divided back out, it flies the new envelope faster than it
+      // flew the old one.
+      cmd.yaw = Math.max(-1, Math.min(1, yawErr * 1.1));
+      cmd.forward = Math.max(-1, Math.min(1, -local.z / 11));
+      cmd.right = Math.max(-1, Math.min(1, local.x / 11));
       cmd.vertical = Math.max(-1, Math.min(1, want.y / 3));
 
       prev.copy(body.position);
@@ -1203,17 +1219,20 @@ console.log('\n=== FIXED STEP ===');
   // rendered frame, so their flying quietly depended on the frame rate — and
   // every bot test in this file runs at 1/240, which is not what the game
   // does. Same command, same duration, three frame rates.
+  //
+  // The command is held CONSTANT and the craft is instead started with an
+  // angular disturbance to recover from. An earlier version of this test
+  // swept the sticks on a sine of wall-clock time, which meant each frame
+  // rate sampled a different command sequence — so it was measuring command
+  // sampling as much as integration, and could not tell the two apart.
   const drive = (dt, useFixed) => {
     const b = new DronePhysics();
     b.reset(new THREE.Vector3(0, 40, 0), 0);
+    b.omega.set(2.5, 1.5, -2.0);       // something for the controller to fight
     const clock = { accum: 0 };
-    const cmd = { forward: 0, right: 0, yaw: 0, vertical: 0, boost: 0 };
+    const cmd = { forward: 0.8, right: 0.5, yaw: 0.3, vertical: 0, boost: 0 };
     const n = Math.round(4 / dt);
     for (let i = 0; i < n; i++) {
-      const t = i * dt;
-      cmd.forward = 0.8;
-      cmd.right = Math.sin(t * 5.5) * 0.9;
-      cmd.yaw = Math.sin(t * 3.1) * 0.7;
       if (useFixed) stepFixed(b, clock, dt, cmd, null);
       else b.step(dt, cmd, null);
     }
@@ -1227,12 +1246,14 @@ console.log('\n=== FIXED STEP ===');
   const rawSpread = Math.max(
     ...[1 / 30, 1 / 60, 1 / 120].map((dt) => drive(dt, false).distanceTo(ref)),
   );
-  ok(fixedSpread < 0.5, 'the fixed step makes a body frame-rate independent',
-     `${fixedSpread.toFixed(3)} m spread across 30/60/120 fps over a 4 s weave`);
-  // Deliberately loose: the point is the order-of-magnitude difference, not a
-  // precise ratio that would flake on a different three.js release.
-  ok(rawSpread > fixedSpread * 2.5, 'stepping once per frame does not',
-     `${rawSpread.toFixed(2)} m spread — ${(rawSpread / fixedSpread).toFixed(1)}x worse`);
+  // With the command held constant this is not approximate: every frame rate
+  // integrates the identical sequence of 1/240 chunks, so the results agree
+  // exactly rather than merely closely.
+  ok(fixedSpread < 1e-9, 'the fixed step makes a body frame-rate independent',
+     `${fixedSpread.toExponential(1)} m spread across 30/60/120 fps over 4 s`);
+  ok(rawSpread > 0.1, 'stepping once per frame does not',
+     `${rawSpread.toFixed(2)} m apart after 4 s — a bot would fly differently ` +
+     'on a 30 fps machine than on a 120 fps one');
 
   // A stalled tab hands back a huge delta. It must not spend the next
   // several seconds catching up in slow motion.
@@ -1352,6 +1373,146 @@ console.log('\n=== GATE HIGHLIGHT TIERS ===');
      'the look-ahead gate is dimmer than the target on every cue',
      `emissive ${S.soon.emissive} vs ${S.next.emissive}`);
   ok(S.soon.emissive > S.ahead.emissive, 'but brighter than the gates beyond it');
+}
+
+console.log('\n=== FLIGHT ENVELOPE ===');
+{
+  // The numbers that decide whether the craft feels heavy. A quadcopter's
+  // only horizontal force is its own thrust vector tipped over, so every one
+  // of these traces back to lean angle and drag.
+  const cmd = (o = {}) => ({ forward: 0, right: 0, yaw: 0, vertical: 0, boost: 0, ...o });
+  const horiz = (b) => Math.hypot(b.velocity.x, b.velocity.z);
+
+  const fresh = () => {
+    const b = new DronePhysics();
+    b.reset(new THREE.Vector3(0, 400, 0), 0);
+    return b;
+  };
+  const toSpeed = (b, v) => {
+    for (let i = 0; i < 240 * 40; i++) {
+      b.step(DT, cmd({ forward: 1 }), null);
+      if (horiz(b) >= v) return true;
+    }
+    return false;
+  };
+
+  // Peak lateral acceleration: the whole turn-and-stop envelope.
+  let peak = 0;
+  {
+    const b = fresh();
+    for (let i = 0; i < 240 * 3; i++) {
+      const v0 = -b.velocity.z;
+      b.step(DT, cmd({ forward: 1 }), null);
+      peak = Math.max(peak, (-b.velocity.z - v0) / DT);
+    }
+  }
+  ok(peak > 12, 'the craft has real cornering authority',
+     `${peak.toFixed(1)} m/s² — was 7.6 when a 90° turn took 6.4 s`);
+
+  // Attitude lag is felt as dead travel on the stick: until the airframe has
+  // rotated, the input has produced no force at all.
+  {
+    const b = fresh();
+    let rise = Infinity;
+    for (let i = 0; i < 240 * 3; i++) {
+      b.step(DT, cmd({ forward: 1 }), null);
+      if (Math.abs(b.attitude().pitch) >= 0.9 * b.t.maxTilt) { rise = i * DT; break; }
+    }
+    ok(rise < 0.20, 'the airframe reaches a commanded lean promptly',
+       `${rise.toFixed(3)} s to 90% of full lean`);
+  }
+
+  // Changing your mind. This was the specific complaint: reversing took over
+  // three seconds, which is longer than the gap between two gates.
+  {
+    const b = fresh();
+    toSpeed(b, 15);
+    let rev = Infinity;
+    for (let i = 0; i < 240 * 10; i++) {
+      b.step(DT, cmd({ forward: -1 }), null);
+      if (-b.velocity.z <= -7.5) { rev = i * DT; break; }
+    }
+    ok(rev < 2.4, 'reversing direction is quick', `${rev.toFixed(2)} s from +15 to -7.5 m/s`);
+  }
+
+  // Stopping distance decides whether a gate can be saved once overshot.
+  {
+    const b = fresh();
+    toSpeed(b, 15);
+    const z0 = b.position.z;
+    let dist = Infinity;
+    for (let i = 0; i < 240 * 10; i++) {
+      b.step(DT, cmd({ forward: -1 }), null);
+      if (-b.velocity.z <= 0.1) { dist = Math.abs(b.position.z - z0); break; }
+    }
+    ok(dist < 9, 'and it pulls up inside a gate spacing', `${dist.toFixed(1)} m from 15 m/s`);
+  }
+
+  /** Seconds to swing the velocity vector 90°, entering at `v0`. */
+  const turn90 = (v0) => {
+    const b = fresh();
+    if (!toSpeed(b, v0)) return null;
+    let prev = Math.atan2(b.velocity.x, b.velocity.z), turned = 0;
+    for (let i = 0; i < 240 * 15; i++) {
+      b.step(DT, cmd({ forward: 1, yaw: 1 }), null);
+      const now = Math.atan2(b.velocity.x, b.velocity.z);
+      let d = now - prev;
+      while (d > Math.PI) d -= Math.PI * 2;
+      while (d < -Math.PI) d += Math.PI * 2;
+      turned += d; prev = now;
+      if (Math.abs(turned) >= Math.PI / 2) return i * DT;
+    }
+    return Infinity;
+  };
+
+  const speeds = [8, 10, 12, 14, 16];
+  const turns = speeds.map(turn90);
+  ok(turns.every((t) => t !== null && t < 3.2), 'a 90° turn is quick at every speed',
+     speeds.map((v, i) => `${v}m/s:${turns[i].toFixed(1)}s`).join('  '));
+
+  // The subtle one, and the reason drag was raised alongside lean rather than
+  // lean alone. With too little drag the craft keeps accelerating through a
+  // turn, and past a certain entry speed it can no longer bend its own path
+  // at all — turn time jumped from 2.9 s to 4.4 s between two speeds a
+  // fraction apart. A handling cliff like that is far worse than being slow,
+  // because it is invisible until the corner has already been missed.
+  const spread = Math.max(...turns) - Math.min(...turns);
+  ok(spread < 0.5, 'and does not fall off a cliff as speed rises',
+     `${spread.toFixed(2)} s between the best and worst entry speed`);
+
+  // None of the above may come at the cost of the craft being controllable.
+  {
+    const b = fresh();
+    for (let i = 0; i < 240 * 10; i++) b.step(DT, cmd(), null);
+    const a = b.attitude();
+    ok(Math.abs(b.position.y - 400) < 0.05 && b.velocity.length() < 0.05,
+       'hover still holds position exactly',
+       `drift ${(b.position.y - 400).toFixed(4)} m, |v| ${b.velocity.length().toFixed(4)}`);
+    ok(Math.hypot(a.pitch, a.roll) < 0.01, 'and stays level');
+  }
+  {
+    // Overshoot is what stiffer gains buy you if taken too far: the airframe
+    // would sail past the commanded angle and rock back.
+    const b = fresh();
+    let over = 0;
+    for (let i = 0; i < 240 * 4; i++) {
+      b.step(DT, cmd({ forward: 1 }), null);
+      over = Math.max(over, Math.abs(b.attitude().pitch));
+    }
+    ok(over / b.t.maxTilt < 1.08, 'the attitude loop does not ring',
+       `${((over / b.t.maxTilt - 1) * 100).toFixed(1)}% overshoot`);
+  }
+  {
+    // Leaning harder costs vertical authority. Full forward stick must still
+    // hold height, or the craft flies itself into the ground on every
+    // straight.
+    const b = fresh();
+    for (let i = 0; i < 240 * 3; i++) b.step(DT, cmd({ forward: 1 }), null);
+    const y0 = b.position.y;
+    for (let i = 0; i < 240 * 6; i++) b.step(DT, cmd({ forward: 1 }), null);
+    ok(Math.abs(b.position.y - y0) < 1.5, 'and holds altitude at full lean',
+       `${(b.position.y - y0).toFixed(2)} m over 6 s flat out`);
+  }
 }
 
 console.log(`\n${fails === 0 ? 'ALL CHECKS PASSED' : `${fails} CHECK(S) FAILED`}\n`);
