@@ -7,16 +7,19 @@ import * as THREE from 'three';
  * screen, so it gets three redundant cues: it is full amber, it pulses, and a
  * cone on its axis shows which way through it counts.
  *
- * The one after it is a pale gold — clearly the same family as the target but
- * dimmer and not pulsing, so it reads as "and then that one" at a glance.
- * That matters most at speed: by the time the amber ring fills the screen it
- * is too late to plan the line into it, and picking the follower out of a
- * field of identical teal rings took a deliberate look.
+ * The one after it is green: a different signal, not a weaker version of the
+ * same one. That matters most at speed — by the time the amber ring fills the
+ * screen it is too late to plan the line into it, so you need to have already
+ * found the one behind it. Picking it out of a field of identical teal rings
+ * took a deliberate look, and a paler amber invited the opposite mistake of
+ * reading two rings as both being "the target". Green cannot be confused with
+ * amber at a glance, so it answers "and then that one" without ever competing
+ * to be "this one".
  */
 
 const COL_DONE = 0x21405c;
 const COL_NEXT = 0xffc247;
-const COL_SOON = 0xd8c07a;
+const COL_SOON = 0x54de62;
 const COL_AHEAD = 0x1f7d86;
 const FORWARD_Z = new THREE.Vector3(0, 0, 1);
 

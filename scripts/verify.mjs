@@ -1308,21 +1308,48 @@ console.log('\n=== GATE HIGHLIGHT TIERS ===');
   const S = Gates.STATES;
   ok(S.next && S.soon && S.ahead && S.done, 'there are four gate tiers');
 
-  const warmth = (hex) => {
-    const r = (hex >> 16) & 255, g = (hex >> 8) & 255, b = hex & 255;
-    return (r + g) / 2 - b;      // >0 is warm, <0 is cool
+  const rgb = (hex) => [(hex >> 16) & 255, (hex >> 8) & 255, hex & 255];
+  const warmth = ([r, g, b]) => (r + g) / 2 - b;   // >0 is warm, <0 is cool
+
+  ok(warmth(rgb(S.next.col)) > 60, 'the target gate is warm',
+     `${warmth(rgb(S.next.col)).toFixed(0)}`);
+  ok(warmth(rgb(S.ahead.col)) < 0, 'gates further out are cool',
+     `${warmth(rgb(S.ahead.col)).toFixed(0)}`);
+
+  // The look-ahead gate is green on purpose: a *different* signal rather than
+  // a weaker amber, so it can never be mistaken for a second thing to aim at.
+  const [sr, sg, sb] = rgb(S.soon.col);
+  ok(sg > sr + 60 && sg > sb + 60, 'the look-ahead gate is unmistakably green',
+     `rgb(${sr}, ${sg}, ${sb})`);
+  ok(S.soon.col !== S.next.col && S.soon.col !== S.ahead.col,
+     'and shares its colour with neither neighbour');
+
+  // What makes the three tiers separable at a glance is hue, not raw channel
+  // distance — teal and green can sit close in RGB while being obviously
+  // different colours on screen, so measure the thing the eye actually uses.
+  const hue = (hex) => {
+    const [r, g, b] = rgb(hex).map((v) => v / 255);
+    const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+    if (d === 0) return 0;
+    const h = max === r ? ((g - b) / d) % 6
+      : max === g ? (b - r) / d + 2
+      : (r - g) / d + 4;
+    return ((h * 60) % 360 + 360) % 360;
   };
-  ok(warmth(S.next.col) > 60, 'the target gate is warm', `${warmth(S.next.col).toFixed(0)}`);
-  ok(warmth(S.soon.col) > 60, 'the gate after it is warm too — the look-ahead cue',
-     `${warmth(S.soon.col).toFixed(0)}`);
-  ok(warmth(S.ahead.col) < 0, 'gates further out stay cool, so the pair stands apart',
-     `${warmth(S.ahead.col).toFixed(0)}`);
-  ok(S.soon.col !== S.next.col, 'the look-ahead gate is not confusable with the target');
-  // It has to read as secondary, or the player has two things claiming to be
-  // the gate to aim at.
+  const hueGap = (a, b) => {
+    const d = Math.abs(hue(a) - hue(b)) % 360;
+    return d > 180 ? 360 - d : d;
+  };
+  ok(hueGap(S.soon.col, S.next.col) > 45 && hueGap(S.soon.col, S.ahead.col) > 45,
+     'the three live tiers are a hue apart from each other',
+     `next ${hue(S.next.col).toFixed(0)}deg, soon ${hue(S.soon.col).toFixed(0)}deg, ` +
+     `ahead ${hue(S.ahead.col).toFixed(0)}deg`);
+
+  // It still has to read as secondary, or the player has two rings claiming
+  // to be the one to fly through.
   ok(S.soon.emissive < S.next.emissive && S.soon.film < S.next.film
      && S.soon.cone < S.next.cone && S.soon.label < S.next.label,
-     'and is dimmer than the target on every cue',
+     'the look-ahead gate is dimmer than the target on every cue',
      `emissive ${S.soon.emissive} vs ${S.next.emissive}`);
   ok(S.soon.emissive > S.ahead.emissive, 'but brighter than the gates beyond it');
 }
